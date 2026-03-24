@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Compliance Checker — Allied Customs Portal</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box;}
+    body{background:#0d1117;font-family:'Inter',sans-serif;}
+    .back-bar{background:#161b27;border-bottom:1px solid #1e2740;padding:10px 20px;}
+    .back-bar a{color:#64748b;text-decoration:none;font-size:13px;font-family:'Inter',sans-serif;}
+    .back-bar a:hover{color:#e2e8f0;}
+    #root{min-height:calc(100vh - 41px);}
+  </style>
+</head>
+<body>
+  <div class="back-bar"><a href="index.html">← Back to Allied Portal</a></div>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+const { useState, useCallback } = React;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COLOUR SYSTEM — exactly matching your Compliance List by Month spreadsheet
+//   GREEN  FF00B050 = Pass / OK / Compliant
+//   RED    FFFF0000 = Fail / Human Error / mark against Last Submitted By
+//   YELLOW FFFFFF00 = Warning / customer error / flagged / not employee fault
+//   GREY   (no fill) = Cancelled / Saved — excluded from stats
+// ─────────────────────────────────────────────────────────────────────────────
+const COLOURS = {
+  GREEN:  { hex: "FF00B050", label: "Pass",    ui: "#22c55e", bg: "rgba(34,197,94,0.12)",   border: "rgba(34,197,94,0.35)"   },
+  RED:    { hex: "FFFF0000", label: "Fail",    ui: "#ef4444", bg: "rgba(239,68,68,0.12)",   border: "rgba(239,68,68,0.35)"   },
+  YELLOW: { hex: "FFFFFF00", label: "Warning", ui: "#eab308", bg: "rgba(234,179,8,0.12)",   border: "rgba(234,179,8,0.35)"   },
+  GREY:   { hex: null,       label: "Excl.",   ui: "#6b7280", bg: "rgba(107,114,128,0.08)", border: "rgba(107,114,128,0.2)"  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMPLIANCE RULES
+// Marks are ALWAYS against "Last Submitted By"
+// INVOICE NOT ATTACHED = immediate RED — no exceptions
+// ─────────────────────────────────────────────────────────────────────────────
+function classifyRow(row) {
+  const errType = String(row["Error Type"] ?? "").trim();
+  const notes   = String(row["Notes"]      ?? "").trim();
+  const notesLC = notes.toLowerCase();
+
+  // ── Cancelled / saved / rejected → excluded (grey) ──
+  if (/^(cancel|cancelled|cancell|correction cancel|correction camncelled|saved|rejected|correction rejected)/i.test(notesLC))
+    return { colour: "GREY", reason: notes };
+
+  // ── Invoice not attached → RED (highest priority rule) ──
+  if (/no invoice|no inv|invoice not|missing invoice/i.test(notesLC))
+    return { colour: "RED", reason: "No invoice attached to job" };
+
+  // ── Error Type based classification ──
+  if (errType === "1- Human Error")
+    return { colour: "RED",    reason: notes || "Human error" };
+  if (errType === "2 - Invoice error" || errType === "2 - Invoice error ")
+    return { colour: "RED",    reason: notes || "Invoice error" };
+  if (errType === "3 - Customer error" || errType === "3 - Customer error ")
+    return { colour: "YELLOW", reason: notes || "Customer error" };
+  if (errType === "4- Other")
+    return { colour: "YELLOW", reason: notes || "Other" };
+  if (errType === "5- None") {
+    if (/no invoice/i.test(notesLC))
+      return { colour: "RED",    reason: "No invoice attached to job" };
+    if (/yellow|flagged|awaiting|orange/i.test(notesLC))
+      return { colour: "YELLOW", reason: notes };
+    return { colour: "GREEN",  reason: notes || "OK" };
+  }
+
+  // ── Infer from notes when no Error Type set ──
+  if (/no invoice/i.test(notesLC))           return { colour: "RED",    reason: "No invoice attached to job" };
+  if (/yellow|flagged|awaiting|orange/i.test(notesLC)) return { colour: "YELLOW", reason: notes };
+  if (/ok/i.test(notesLC))                   return { colour: "GREEN",  reason: notes };
+  if (notes.length > 1)                      return { colour: "YELLOW", reason: notes };
+  return { colour: "GREEN", reason: "OK" };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROCESS ROWS — deduplicate by LRN, classify each
+// ─────────────────────────────────────────────────────────────────────────────
+function processRows(rows) {
+  const seen = new Set();
+  return rows
+    .filter(r => {
+      const lrn = String(r["LRN"] ?? "").trim();
+      if (!lrn || seen.has(lrn)) return false;
+      seen.add(lrn);
+      return true;
+    })
+    .map(row => {
+      const { colour, reason } = classifyRow(row);
+
+      // Normalise date
+      const rawDate = row["Date Created"] ?? row["DATE"] ?? "";
+      let dateStr = String(rawDate).split("T")[0].split(" ")[0];
+      if (dateStr.length > 10) dateStr = dateStr.substring(0, 10);
+
+      // Month from date
+      const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+      let monthStr = String(row["Month"] ?? "").trim();
+      if (!monthStr && dateStr.length === 10) {
+        const m = parseInt(dateStr.split("-")[1], 10);
+        if (m >= 1 && m <= 12) monthStr = monthNames[m - 1];
+      }
+
+      return {
+        lrn:           String(row["LRN"]              ?? "").trim(),
+        dateCreated:   dateStr,
+        consignee:     String(row["Consignee"]         ?? row["Consignee (8.1)"]     ?? "").trim(),
+        consigneeName: String(row["Consignee Name "]   ?? row["Consignee Name"]      ?? row["Consignee Name (8.2)"] ?? "").trim(),
+        consignor:     String(row["Consignor "]        ?? row["Consignor"]           ?? row["Consignor (2.1)"]      ?? "").trim(),
+        consignorName: String(row["Consignor Name"]    ?? row["Consignor Name (2.2)"] ?? "").trim(),
+        createdBy:     String(row["Created By"]        ?? "").trim(),
+        submittedBy:   String(row["Last Submitted By"] ?? "").trim(),  // ← marks always go here
+        notes:         String(row["Notes"]             ?? "").trim(),
+        errType:       String(row["Error Type"]        ?? "").trim(),
+        month:         monthStr,
+        colour,
+        reason,
+      };
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STAFF STATS — marks always against Last Submitted By
+// ─────────────────────────────────────────────────────────────────────────────
+function buildStaffStats(jobs) {
+  const map = {};
+  jobs.forEach(j => {
+    const name = j.submittedBy || "Unknown";
+    if (!map[name]) map[name] = { green: 0, red: 0, yellow: 0, grey: 0, jobs: [] };
+    map[name][j.colour.toLowerCase()]++;
+    map[name].jobs.push(j);
+  });
+  return Object.entries(map).map(([name, s]) => {
+    const active = s.green + s.red + s.yellow;
+    return {
+      name, ...s,
+      total:    s.green + s.red + s.yellow + s.grey,
+      active,
+      failRate: active > 0 ? Math.round((s.red    / active) * 100) : 0,
+      warnRate: active > 0 ? Math.round((s.yellow / active) * 100) : 0,
+      passRate: active > 0 ? Math.round((s.green  / active) * 100) : 0,
+    };
+  }).sort((a, b) => b.failRate - a.failRate || b.warnRate - a.warnRate);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXCEL EXPORT — exactly matching your Compliance List by Month format
+// Headers A-H: fill FFC0C0C0 (grey)
+// Headers I-M: fill FFFFFF00 (yellow)
+// Data Notes column (I): FF00B050 green / FFFF0000 red / FFFFFF00 yellow
+// ─────────────────────────────────────────────────────────────────────────────
+function exportToExcel(jobs, fileName) {
+  const WB = XLSX.utils.book_new();
+
+  // ── Helper to build a cell with style ──
+  // We use SheetJS with write options for styles (xlsx-js-style compatible approach
+  // via manual s property on cells)
+  const HEADER_GREY   = { patternType: "solid", fgColor: { rgb: "C0C0C0" } };
+  const HEADER_YELLOW = { patternType: "solid", fgColor: { rgb: "FFFF00" } };
+  const FILL_GREEN    = { patternType: "solid", fgColor: { rgb: "00B050" } };
+  const FILL_RED      = { patternType: "solid", fgColor: { rgb: "FF0000" } };
+  const FILL_YELLOW   = { patternType: "solid", fgColor: { rgb: "FFFF00" } };
+  const BOLD          = { bold: true };
+
+  const colourToFill = { GREEN: FILL_GREEN, RED: FILL_RED, YELLOW: FILL_YELLOW, GREY: null };
+
+  const HEADERS = [
+    "LRN","Date Created","Consignee","Consignee Name",
+    "Consignor","Consignor Name","Created By","Last Submitted By",
+    "Notes","DATE","Month","Error Type","Error code list"
+  ];
+
+  // Map Error Type back for export
+  const colourToErrType = {
+    GREEN:  "5- None",
+    RED:    "1- Human Error",
+    YELLOW: "4- Other",
+    GREY:   "5- None",
+  };
+  const reasonToErrType = (colour, reason) => {
+    if (/no invoice/i.test(reason))   return "1- Human Error";
+    if (/customer/i.test(reason))     return "3 - Customer error";
+    if (/invoice/i.test(reason))      return "2 - Invoice error";
+    return colourToErrType[colour] ?? "5- None";
+  };
+
+  const wsData = [];
+
+  // Header row
+  wsData.push(HEADERS.map((h, i) => ({
+    v: h, t: "s",
+    s: { fill: i < 8 ? HEADER_GREY : HEADER_YELLOW, font: BOLD, alignment: { horizontal: "center" } }
+  })));
+
+  // Data rows
+  jobs.forEach(j => {
+    const fill = colourToFill[j.colour];
+    const notesCell = {
+      v: j.reason || j.notes || "OK", t: "s",
+      s: fill ? { fill, font: { bold: false }, alignment: { wrapText: true } } : {}
+    };
+    const errType = reasonToErrType(j.colour, j.reason);
+    wsData.push([
+      { v: j.lrn,           t: "s" },
+      { v: j.dateCreated,   t: "s" },
+      { v: j.consignee,     t: "s" },
+      { v: j.consigneeName, t: "s" },
+      { v: j.consignor,     t: "s" },
+      { v: j.consignorName, t: "s" },
+      { v: j.createdBy,     t: "s" },
+      { v: j.submittedBy,   t: "s" },
+      notesCell,
+      { v: j.dateCreated,   t: "s" },
+      { v: j.month,         t: "s" },
+      { v: errType,         t: "s" },
+      { v: "",              t: "s" },
+    ]);
+  });
+
+  // Build worksheet from array of cell objects
+  const ws = XLSX.utils.aoa_to_sheet(wsData.map(row => row.map(c => c.v)));
+
+  // Apply styles manually to each cell
+  const range = XLSX.utils.decode_range(ws["!ref"]);
+  for (let R = range.s.r; R <= range.e.r; R++) {
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const addr = XLSX.utils.encode_cell({ r: R, c: C });
+      if (!ws[addr]) continue;
+      const styleCell = wsData[R]?.[C];
+      if (styleCell?.s) ws[addr].s = styleCell.s;
+    }
+  }
+
+  // Column widths matching your sheet
+  ws["!cols"] = [
+    { wch: 20 }, // LRN
+    { wch: 20 }, // Date Created
+    { wch: 16 }, // Consignee
+    { wch: 28 }, // Consignee Name
+    { wch: 16 }, // Consignor
+    { wch: 28 }, // Consignor Name
+    { wch: 18 }, // Created By
+    { wch: 18 }, // Last Submitted By
+    { wch: 40 }, // Notes
+    { wch: 12 }, // DATE
+    { wch: 8  }, // Month
+    { wch: 18 }, // Error Type
+    { wch: 18 }, // Error code list
+  ];
+  ws["!freeze"] = { xSplit: 0, ySplit: 1 }; // freeze header row
+
+  const month = jobs[0]?.month || "Export";
+  XLSX.utils.book_append_sheet(WB, ws, `${month} ${new Date().getFullYear()}`);
+
+  // ── Staff Summary sheet ──
+  const staffData = buildStaffStats(jobs);
+  const summaryHeaders = [
+    "Last Submitted By","Total Jobs","Pass (Green)","Warnings (Yellow)",
+    "Fails (Red)","Cancelled","Active Jobs","Pass Rate %","Fail Rate %"
+  ];
+  const summaryRows = staffData.map(s => [
+    s.name, s.total, s.green, s.yellow, s.red, s.grey,
+    s.active, `${s.passRate}%`, `${s.failRate}%`
+  ]);
+  const wsSummary = XLSX.utils.aoa_to_sheet([summaryHeaders, ...summaryRows]);
+  wsSummary["!cols"] = [
+    { wch: 22 },{ wch: 12 },{ wch: 14 },{ wch: 18 },
+    { wch: 12 },{ wch: 12 },{ wch: 12 },{ wch: 12 },{ wch: 12 }
+  ];
+  // Style summary headers
+  const sumRange = XLSX.utils.decode_range(wsSummary["!ref"]);
+  for (let C = sumRange.s.c; C <= sumRange.e.c; C++) {
+    const addr = XLSX.utils.encode_cell({ r: 0, c: C });
+    if (wsSummary[addr]) wsSummary[addr].s = { fill: HEADER_GREY, font: BOLD };
+  }
+  // Colour fail rate cells
+  staffData.forEach((s, i) => {
+    const rowIdx = i + 1;
+    // Fail rate cell = col H (index 8)
+    const failAddr = XLSX.utils.encode_cell({ r: rowIdx, c: 8 });
+    if (wsSummary[failAddr]) {
+      const fill = s.failRate === 0 ? FILL_GREEN : s.failRate < 15 ? FILL_YELLOW : FILL_RED;
+      wsSummary[failAddr].s = { fill };
+    }
+  });
+  XLSX.utils.book_append_sheet(WB, wsSummary, "Staff Summary");
+
+  // Download
+  const exportName = fileName.replace(/\.[^.]+$/, "") + "_compliance_export.xlsx";
+  XLSX.writeFile(WB, exportName, { bookType: "xlsx", type: "binary", cellStyles: true });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SMALL COMPONENTS
+// ─────────────────────────────────────────────────────────────────────────────
+function Badge({ colour }) {
+  const c = COLOURS[colour] ?? COLOURS.GREEN;
+  return (
+    <span style={{
+      padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700,
+      background: c.bg, color: c.ui, border: `1px solid ${c.border}`, whiteSpace: "nowrap"
+    }}>
+      {colour === "GREEN" ? "✓ Pass" : colour === "RED" ? "✗ Fail" : colour === "YELLOW" ? "⚠ Warning" : "– Excl."}
+    </span>
+  );
+}
+
+function Bar({ rate, color, width = 100 }) {
+  return (
+    <div style={{ height: 5, borderRadius: 3, background: "#1e2740", width, overflow: "hidden" }}>
+      <div style={{ height: "100%", width: `${Math.min(rate, 100)}%`, background: color, borderRadius: 3 }} />
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN APP
+// ─────────────────────────────────────────────────────────────────────────────
+function ComplianceChecker() {
+  const [jobs, setJobs]                   = useState(null);
+  const [staff, setStaff]                 = useState(null);
+  const [fileName, setFileName]           = useState("");
+  const [tab, setTab]                     = useState("overview");
+  const [expandedStaff, setExpandedStaff] = useState(null);
+  const [filterColour, setFilterColour]   = useState("ALL");
+  const [search, setSearch]               = useState("");
+  const [dragging, setDragging]           = useState(false);
+  const [warning, setWarning]             = useState("");
+
+  const processFile = useCallback((file) => {
+    setFileName(file.name); setWarning("");
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const wb = XLSX.read(e.target.result, { type: "binary" });
+      let sheetName = wb.SheetNames.find(n => n.toUpperCase().includes("ALLIED"))
+                   ?? wb.SheetNames.find(n => /feb|mar|jan|apr|may|jun|jul|aug|sep|oct|nov|dec/i.test(n))
+                   ?? wb.SheetNames.find(n => /master/i.test(n))
+                   ?? wb.SheetNames[0];
+      if (!wb.SheetNames.find(n => n.toUpperCase().includes("ALLIED"))) {
+        setWarning(`Using sheet "${sheetName}". For TAN Summaries upload the file with the ALLIED TAN tab.`);
+      }
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: "" });
+      if (!rows.length) { alert("No data found in this file."); return; }
+      const processed = processRows(rows);
+      setJobs(processed);
+      setStaff(buildStaffStats(processed));
+    };
+    reader.readAsBinaryString(file);
+  }, []);
+
+  const onDrop = (e) => {
+    e.preventDefault(); setDragging(false);
+    if (e.dataTransfer.files[0]) processFile(e.dataTransfer.files[0]);
+  };
+
+  // Totals
+  const total   = jobs?.length ?? 0;
+  const green   = jobs?.filter(j => j.colour === "GREEN").length  ?? 0;
+  const yellow  = jobs?.filter(j => j.colour === "YELLOW").length ?? 0;
+  const red     = jobs?.filter(j => j.colour === "RED").length    ?? 0;
+  const grey    = jobs?.filter(j => j.colour === "GREY").length   ?? 0;
+  const active  = total - grey;
+  const passRate = active > 0 ? Math.round((green  / active) * 100) : 0;
+  const failRate = active > 0 ? Math.round((red    / active) * 100) : 0;
+
+  const filtered = jobs ? jobs.filter(j => {
+    if (filterColour !== "ALL" && j.colour !== filterColour) return false;
+    if (search) {
+      const t = search.toLowerCase();
+      return j.lrn.toLowerCase().includes(t) ||
+             j.submittedBy.toLowerCase().includes(t) ||
+             j.consigneeName.toLowerCase().includes(t) ||
+             j.reason.toLowerCase().includes(t);
+    }
+    return true;
+  }) : [];
+
+  // Styles
+  const S = {
+    root: { fontFamily: "'Inter','Segoe UI',sans-serif", background: "#0d1117", minHeight: "100vh", color: "#e2e8f0" },
+    hdr:  { background: "#161b27", borderBottom: "1px solid #1e2740", padding: "16px 28px", display: "flex", alignItems: "center", gap: 12 },
+    logo: { background: "linear-gradient(135deg,#1d4ed8,#6d28d9)", borderRadius: 10, width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 },
+    main: { maxWidth: 1200, margin: "0 auto", padding: "22px 20px" },
+    drop: { border: `2px dashed ${dragging ? "#3b82f6" : "#1e2740"}`, borderRadius: 14, padding: "52px 40px", textAlign: "center", background: dragging ? "rgba(59,130,246,0.05)" : "#161b27" },
+    btn:  { background: "linear-gradient(135deg,#1d4ed8,#5b21b6)", border: "none", borderRadius: 8, color: "#fff", padding: "10px 20px", fontSize: 13, fontWeight: 600, cursor: "pointer" },
+    exportBtn: { background: "linear-gradient(135deg,#065f46,#047857)", border: "none", borderRadius: 8, color: "#fff", padding: "8px 18px", fontSize: 12, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 },
+    tabs: { display: "flex", gap: 2, marginBottom: 18, background: "#161b27", border: "1px solid #1e2740", borderRadius: 9, padding: 3, width: "fit-content" },
+    tab:  (a) => ({ background: a ? "linear-gradient(135deg,#1d4ed8,#5b21b6)" : "transparent", border: "none", borderRadius: 6, color: a ? "#fff" : "#64748b", padding: "7px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }),
+    tw:   { background: "#161b27", border: "1px solid #1e2740", borderRadius: 12, overflow: "auto" },
+    th:   { padding: "10px 13px", textAlign: "left", fontSize: 10, color: "#475569", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.5px", borderBottom: "1px solid #1e2740", background: "#0d1117", whiteSpace: "nowrap" },
+    td:   { padding: "10px 13px", fontSize: 12, borderBottom: "1px solid #0d1117", verticalAlign: "middle" },
+    warn: { background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.3)", borderRadius: 9, padding: "9px 14px", marginBottom: 14, fontSize: 12, color: "#eab308" },
+    pill: (active, col) => ({ background: active ? `${col}22` : "#161b27", border: `1px solid ${active ? col : "#1e2740"}`, borderRadius: 20, color: active ? col : "#64748b", padding: "4px 12px", fontSize: 11, fontWeight: 600, cursor: "pointer" }),
+  };
+
+  return (
+    <div style={S.root}>
+      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+      {/* Header */}
+      <div style={S.hdr}>
+        <div style={S.logo}>🛃</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 700, fontSize: 16 }}>Customs Compliance Checker</div>
+          <div style={{ fontSize: 11, color: "#475569", marginTop: 1 }}>Allied TAN · Thyme IT · Marks against Last Submitted By</div>
+        </div>
+        {jobs && (
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <button style={S.exportBtn} onClick={() => exportToExcel(jobs, fileName)}>
+              ⬇ Export to Excel
+            </button>
+            <button style={{ ...S.btn, fontSize: 11, padding: "7px 14px" }}
+              onClick={() => { setJobs(null); setStaff(null); setFileName(""); setWarning(""); }}>
+              ↑ New File
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div style={S.main}>
+
+        {/* Upload screen */}
+        {!jobs && (
+          <div style={S.drop}
+            onDragOver={e => { e.preventDefault(); setDragging(true); }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={onDrop}>
+            <div style={{ fontSize: 42, marginBottom: 12 }}>📂</div>
+            <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 8 }}>Upload TAN Summary or Compliance Report</div>
+            <div style={{ fontSize: 13, color: "#64748b", marginBottom: 20 }}>
+              .xlsx or .xls from Thyme IT — reads the <strong style={{ color: "#818cf8" }}>ALLIED TAN</strong> sheet automatically
+            </div>
+            <label>
+              <input type="file" accept=".xlsx,.xls" style={{ display: "none" }}
+                onChange={e => { if (e.target.files[0]) processFile(e.target.files[0]); }} />
+              <span style={{ ...S.btn, display: "inline-block" }}>Choose File</span>
+            </label>
+
+            {/* Colour legend */}
+            <div style={{ marginTop: 28, display: "flex", justifyContent: "center", gap: 28, flexWrap: "wrap" }}>
+              {[
+                ["#22c55e", "Green = Pass / Compliant"],
+                ["#eab308", "Yellow = Warning (customer error / not employee fault)"],
+                ["#ef4444", "Red = Fail — mark against Last Submitted By"],
+                ["#6b7280", "Grey = Cancelled — excluded from stats"],
+              ].map(([col, txt]) => (
+                <div key={txt} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#64748b" }}>
+                  <div style={{ width: 10, height: 10, borderRadius: "50%", background: col, flexShrink: 0 }} />
+                  {txt}
+                </div>
+              ))}
+            </div>
+
+            {/* Invoice rule callout */}
+            <div style={{ marginTop: 24, background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 10, padding: "12px 20px", display: "inline-block", textAlign: "left" }}>
+              <div style={{ fontWeight: 700, color: "#ef4444", fontSize: 13, marginBottom: 4 }}>🔴 Invoice Rule</div>
+              <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                If an invoice is not attached to the job → automatic <strong style={{ color: "#ef4444" }}>RED</strong> against Last Submitted By. No exceptions.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {warning && <div style={S.warn}>⚠ {warning}</div>}
+
+        {jobs && (<>
+
+          {/* Stats */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 12, marginBottom: 20 }}>
+            {[
+              { val: total,    label: "Declarations",  color: "#3b82f6" },
+              { val: green,    label: "Pass (Green)",   color: "#22c55e" },
+              { val: yellow,   label: "Warnings",       color: "#eab308" },
+              { val: red,      label: "Fails (Red)",    color: "#ef4444" },
+              { val: grey,     label: "Cancelled",      color: "#6b7280" },
+              { val: `${passRate}%`, label: "Pass Rate", color: "#22c55e" },
+              { val: `${failRate}%`, label: "Fail Rate", color: "#ef4444" },
+            ].map(({ val, label, color }) => (
+              <div key={label} style={{ background: "#161b27", border: `1px solid ${color}33`, borderRadius: 12, padding: "14px 16px", borderTop: `3px solid ${color}` }}>
+                <div style={{ fontSize: 26, fontWeight: 800, color, letterSpacing: "-0.5px" }}>{val}</div>
+                <div style={{ fontSize: 10, color: "#475569", marginTop: 3, textTransform: "uppercase", letterSpacing: "0.4px" }}>{label}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Tabs */}
+          <div style={S.tabs}>
+            {[["overview","📊 Overview"],["declarations","📋 Declarations"],["staff","👤 Staff Report"]].map(([t,lbl]) => (
+              <button key={t} style={S.tab(tab===t)} onClick={() => setTab(t)}>{lbl}</button>
+            ))}
+          </div>
+
+          {/* ── OVERVIEW ── */}
+          {tab === "overview" && (
+            <div style={S.tw}>
+              <div style={{ padding: "12px 16px", borderBottom: "1px solid #1e2740", fontWeight: 700, fontSize: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>Compliance Overview — {fileName}</span>
+                <span style={{ fontSize: 11, color: "#475569", fontWeight: 400 }}>
+                  {total} declarations · {grey} cancelled excluded · marks against Last Submitted By
+                </span>
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>{["Colour","What It Means","Count","% of Active","Rule"].map(h => <th key={h} style={S.th}>{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {[
+                    { colour: "GREEN",  meaning: "Fully compliant, all fields correct, invoice attached",   count: green,  rule: "Error Type 5-None / Notes = OK" },
+                    { colour: "YELLOW", meaning: "Warning — customer error or routing issue, not employee fault", count: yellow, rule: "Error Type 3 or 4 / flagged" },
+                    { colour: "RED",    meaning: "FAIL — human error or missing invoice. Mark against Last Submitted By", count: red, rule: "Error Type 1-2 / no invoice" },
+                    { colour: "GREY",   meaning: "Cancelled / saved — excluded from all compliance rates",   count: grey,   rule: "Notes: cancelled/saved/rejected" },
+                  ].map(row => (
+                    <tr key={row.colour}>
+                      <td style={S.td}><Badge colour={row.colour} /></td>
+                      <td style={{ ...S.td, maxWidth: 340 }}>{row.meaning}</td>
+                      <td style={{ ...S.td, fontWeight: 700, color: COLOURS[row.colour].ui }}>{row.count}</td>
+                      <td style={S.td}>
+                        {row.colour !== "GREY" && active > 0 ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <Bar rate={Math.round((row.count / active) * 100)} color={COLOURS[row.colour].ui} width={80} />
+                            <span style={{ fontSize: 11, fontWeight: 700, color: COLOURS[row.colour].ui }}>
+                              {Math.round((row.count / active) * 100)}%
+                            </span>
+                          </div>
+                        ) : "—"}
+                      </td>
+                      <td style={{ ...S.td, fontSize: 11, color: "#64748b" }}>{row.rule}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {/* Invoice rule banner */}
+              <div style={{ margin: "0 16px 16px", padding: "12px 16px", background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.25)", borderRadius: 8, fontSize: 12 }}>
+                <strong style={{ color: "#ef4444" }}>🔴 Invoice Rule: </strong>
+                <span style={{ color: "#94a3b8" }}>
+                  Staff have been instructed that the invoice MUST be attached to every job in Thyme IT.
+                  If it is not attached → automatic RED fail recorded against <strong>Last Submitted By</strong>. No exceptions.
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* ── DECLARATIONS ── */}
+          {tab === "declarations" && (<>
+            <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+              <input style={{ background: "#161b27", border: "1px solid #1e2740", borderRadius: 8, color: "#e2e8f0", padding: "7px 12px", fontSize: 12, outline: "none", width: 200 }}
+                placeholder="Search LRN, name, reason…" value={search} onChange={e => setSearch(e.target.value)} />
+              {[["ALL","All","#64748b"],["GREEN","Pass","#22c55e"],["YELLOW","Warning","#eab308"],["RED","Fail","#ef4444"],["GREY","Cancelled","#6b7280"]].map(([k,lbl,col]) => (
+                <button key={k} style={S.pill(filterColour===k, col)} onClick={() => setFilterColour(k)}>{lbl}</button>
+              ))}
+              <span style={{ fontSize: 11, color: "#475569", marginLeft: "auto" }}>{filtered.length} shown</span>
+            </div>
+            <div style={S.tw}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>{["LRN","Date","Consignee Name","Last Submitted By","Error Type","Status","Reason / Notes"].map(h => <th key={h} style={S.th}>{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {filtered.length === 0 && (
+                    <tr><td colSpan={7} style={{ ...S.td, textAlign: "center", color: "#475569", padding: 36 }}>No declarations match.</td></tr>
+                  )}
+                  {filtered.map(j => (
+                    <tr key={j.lrn} style={{ background: j.colour === "RED" ? "rgba(239,68,68,0.04)" : "transparent" }}>
+                      <td style={{ ...S.td, fontFamily: "monospace", fontSize: 10, color: "#818cf8" }}>{j.lrn}</td>
+                      <td style={{ ...S.td, fontSize: 11, color: "#64748b", whiteSpace: "nowrap" }}>{j.dateCreated}</td>
+                      <td style={{ ...S.td, fontSize: 12 }}>{j.consigneeName || j.consignee || "—"}</td>
+                      <td style={{ ...S.td, fontWeight: 700, fontSize: 12, color: j.colour === "RED" ? "#ef4444" : "#e2e8f0" }}>{j.submittedBy || "—"}</td>
+                      <td style={{ ...S.td, fontSize: 11, color: "#64748b" }}>{j.errType || "—"}</td>
+                      <td style={S.td}><Badge colour={j.colour} /></td>
+                      <td style={{ ...S.td, fontSize: 11, color: j.colour === "RED" ? "#fca5a5" : "#94a3b8", maxWidth: 260 }}>{j.reason || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>)}
+
+          {/* ── STAFF REPORT ── */}
+          {tab === "staff" && (
+            <div>
+              <div style={{ marginBottom: 14, fontSize: 12, color: "#64748b" }}>
+                All marks recorded against <strong style={{ color: "#e2e8f0" }}>Last Submitted By</strong>. Cancelled declarations excluded. Ranked by fail rate (Red).
+              </div>
+              {staff?.map(s2 => (
+                <div key={s2.name} style={{ background: "#161b27", border: `1px solid ${s2.red > 0 ? "rgba(239,68,68,0.3)" : "#1e2740"}`, borderRadius: 12, marginBottom: 9, overflow: "hidden" }}>
+                  <div style={{ display: "flex", alignItems: "center", padding: "13px 16px", cursor: "pointer", gap: 12 }}
+                    onClick={() => setExpandedStaff(expandedStaff === s2.name ? null : s2.name)}>
+
+                    {/* Avatar */}
+                    <div style={{ width: 34, height: 34, borderRadius: "50%", flexShrink: 0,
+                      background: s2.red > 0 ? "rgba(239,68,68,0.15)" : s2.yellow > 0 ? "rgba(234,179,8,0.12)" : "rgba(34,197,94,0.12)",
+                      border: `2px solid ${s2.red > 0 ? "#ef444455" : s2.yellow > 0 ? "#eab30855" : "#22c55e55"}`,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: 13, fontWeight: 800,
+                      color: s2.red > 0 ? "#ef4444" : s2.yellow > 0 ? "#eab308" : "#22c55e" }}>
+                      {s2.name.charAt(0).toUpperCase()}
+                    </div>
+
+                    <div style={{ fontWeight: 700, fontSize: 14, flex: 1 }}>{s2.name}</div>
+
+                    {/* Pill counts */}
+                    <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                      {s2.green  > 0 && <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, fontWeight: 700, background: "rgba(34,197,94,0.1)",  color: "#22c55e", border: "1px solid rgba(34,197,94,0.3)"  }}>{s2.green} Pass</span>}
+                      {s2.yellow > 0 && <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, fontWeight: 700, background: "rgba(234,179,8,0.1)",  color: "#eab308", border: "1px solid rgba(234,179,8,0.3)"  }}>{s2.yellow} Warn</span>}
+                      {s2.red    > 0 && <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, fontWeight: 700, background: "rgba(239,68,68,0.1)",   color: "#ef4444", border: "1px solid rgba(239,68,68,0.3)"  }}>{s2.red} Fail</span>}
+                      {s2.grey   > 0 && <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, fontWeight: 700, background: "rgba(107,114,128,0.1)", color: "#6b7280", border: "1px solid rgba(107,114,128,0.2)" }}>{s2.grey} Canc</span>}
+                    </div>
+
+                    <div style={{ fontSize: 11, color: "#475569" }}>{s2.active} active</div>
+
+                    {/* Fail rate bar */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                      <Bar rate={s2.failRate} color="#ef4444" width={90} />
+                      <span style={{ fontSize: 17, fontWeight: 800, minWidth: 44, textAlign: "right",
+                        color: s2.failRate === 0 ? "#22c55e" : s2.failRate < 10 ? "#eab308" : "#ef4444" }}>
+                        {s2.failRate}%
+                      </span>
+                    </div>
+                    <span style={{ color: "#475569", fontSize: 11, marginLeft: 4 }}>{expandedStaff === s2.name ? "▲" : "▼"}</span>
+                  </div>
+
+                  {expandedStaff === s2.name && (
+                    <div style={{ borderTop: "1px solid #1e2740" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr>{["LRN","Date","Consignee","Status","Reason / Notes"].map(h =>
+                            <th key={h} style={{ ...S.th, background: "#0a0e17" }}>{h}</th>)}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {s2.jobs.map(j => (
+                            <tr key={j.lrn} style={{ background: j.colour === "RED" ? "rgba(239,68,68,0.05)" : "transparent" }}>
+                              <td style={{ ...S.td, fontFamily: "monospace", fontSize: 10, color: "#818cf8" }}>{j.lrn}</td>
+                              <td style={{ ...S.td, fontSize: 11, color: "#64748b" }}>{j.dateCreated}</td>
+                              <td style={{ ...S.td, fontSize: 11 }}>{j.consigneeName || j.consignee || "—"}</td>
+                              <td style={S.td}><Badge colour={j.colour} /></td>
+                              <td style={{ ...S.td, fontSize: 11, color: j.colour === "RED" ? "#fca5a5" : "#94a3b8", maxWidth: 300 }}>{j.reason || "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </>)}
+      </div>
+    </div>
+  );
+}
+
+
+ReactDOM.createRoot(document.getElementById("root")).render(<ComplianceChecker />);
+  </script>
+</body>
+</html>
