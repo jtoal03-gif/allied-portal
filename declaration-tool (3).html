@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Declaration Tool — Allied Customs Portal</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:#0d1117;font-family:'Inter',sans-serif;}
+.back-bar{background:#161b27;border-bottom:1px solid #1e2740;padding:10px 20px;}
+.back-bar a{color:#64748b;text-decoration:none;font-size:13px;font-family:'Inter',sans-serif;}
+.back-bar a:hover{color:#e2e8f0;}
+#root{min-height:calc(100vh - 41px);}
+</style>
+</head>
+<body>
+<div class="back-bar"><a href="index.html">← Back to Allied Portal</a></div>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useCallback, useEffect, useRef } = React;
+
+// ─── Convex corrections logger ────────────────────────────────────────────────
+const CONVEX_URL = "https://bright-crane-765.convex.cloud";
+
+async function logCorrectionToConvex(data) {
+  try {
+    await fetch(`${CONVEX_URL}/api/mutation`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "corrections:logCorrection", args: data, format: "json" })
+    });
+  } catch(e) { console.warn("Convex log failed:", e); }
+}
+
+// ─── Allied Group Details ─────────────────────────────────────────────────────
+const ALLIED = {
+  IE: { eori: "IE3717281MH", name: "Allied Group Limited", address: "Edenaveys Industrial Estate", city: "Armagh", postcode: "BT60 1NF", country: "IE" },
+  GB: { eori: "GB275077974000", name: "Allied Group Limited", address: "Formation works, 2 Edenaveys Ind Es", city: "Armagh", postcode: "BT60 1HF", country: "IE" },
+};
+
+const DECL_TYPES = [
+  { id: "AIS_IMPORT", label: "🇮🇪 Irish Import (AIS)", type1: "IM", type2: "D", jurisdiction: "IE", defaults: { procedureCode: "4000", additionalProcedure: "000", preference: "100", transportMode: "1", paymentMethod: "E" }},
+  { id: "AES_EXPORT", label: "🇮🇪 Irish Export (AEP)", type1: "EX", type2: "A", jurisdiction: "IE", defaults: { procedureCode: "1000", additionalProcedure: "099", preference: "4099", transportMode: "1", paymentMethod: "E" }},
+  { id: "CDS_IMPORT", label: "🇬🇧 UK Import (CDS)", type1: "IM", type2: "D", jurisdiction: "GB", defaults: { procedureCode: "4000", additionalProcedure: "000", preference: "100", transportMode: "6", paymentMethod: "E" }},
+  { id: "CDS_EXPORT", label: "🇬🇧 UK Export (CDS)", type1: "EX", type2: "A", jurisdiction: "GB", defaults: { procedureCode: "1040", additionalProcedure: "000", preference: "", transportMode: "6", paymentMethod: "E" }},
+];
+
+const IE_OFFICES = [
+  { code: "IEDUB100", label: "IEDUB100 — Dublin Port" },
+  { code: "IEDUB1005", label: "IEDUB1005 — Dublin Airport" },
+  { code: "IECORK", label: "IECORK — Cork Port" },
+  { code: "IEROSLA", label: "IEROSLA — Rosslare" },
+  { code: "IEDRO", label: "IEDRO — Drogheda" },
+  { code: "IEWAT", label: "IEWAT — Waterford" },
+];
+
+const DEFAULT_BOX44 = {
+  AIS_IMPORT: [
+    { code: "1A05", value: "IEPOSTPONED", description: "Postponed VAT", source: "default" },
+    { code: "N935", value: "", description: "Invoice reference", source: "default" },
+    { code: "1D95", value: "", description: "Transport reference", source: "default" },
+  ],
+  AES_EXPORT: [
+    { code: "N935", value: "", description: "Invoice reference", source: "default" },
+    { code: "1D95", value: "", description: "Transport reference", source: "default" },
+  ],
+  CDS_IMPORT: [{ code: "N935", value: "", description: "Invoice reference", source: "default" }],
+  CDS_EXPORT: [{ code: "N935", value: "", description: "Invoice reference", source: "default" }],
+};
+
+const EXPORT_MEASURE_TYPES = new Set(["710","715","717","718","720","722","724","725","730","740","745","749","755"]);
+
+function generateLRN() {
+  const d = new Date();
+  return `TWM${String(d.getFullYear()).slice(2)}${String(d.getMonth()+1).padStart(2,"0")}${Math.floor(Math.random()*99999).toString().padStart(5,"0")}`;
+}
+
+function escXML(s) {
+  return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+function matchCustomer(name, customers) {
+  if (!name || !customers.length) return null;
+  const n = name.toLowerCase().replace(/[^a-z0-9\s]/g,"").trim();
+  let best = null, bestScore = 0;
+  for (const c of customers) {
+    const cn = (c.n||"").toLowerCase().replace(/[^a-z0-9\s]/g,"").trim();
+    if (!cn) continue;
+    if (cn === n) return { customer: c, confidence: 100 };
+    let score = 0;
+    if (cn.includes(n) || n.includes(cn)) {
+      score = Math.min(cn.length,n.length)/Math.max(cn.length,n.length)*90;
+    } else {
+      const nW = n.split(" ").filter(w=>w.length>2);
+      const cW = cn.split(" ").filter(w=>w.length>2);
+      const overlap = nW.filter(w=>cW.includes(w)).length;
+      if (overlap>0) score = overlap/Math.max(nW.length,cW.length)*80;
+    }
+    if (score>bestScore) { best=c; bestScore=score; }
+  }
+  return bestScore>40 ? { customer: best, confidence: Math.round(bestScore) } : null;
+}
+
+async function fetchTARIC(code, declTypeId) {
+  const padded = code.replace(/\D/g,"").padEnd(10,"0").substring(0,10);
+  const isExport = declTypeId.includes("EXPORT");
+  const isIrish = declTypeId.includes("AIS")||declTypeId.includes("AES");
+  const base = isIrish
+    ? `https://www.trade-tariff.service.gov.uk/xi/api/v2/commodities/${padded}`
+    : `https://www.trade-tariff.service.gov.uk/api/v2/commodities/${padded}`;
+  try {
+    const r = await fetch(base);
+    if (!r.ok) return null;
+    const d = await r.json();
+    const included = d.included||[];
+    const measures = included.filter(i=>i.type==="measure");
+    const relevantMeasures = measures.filter(m=>{
+      const mtId = m.relationships?.measure_type?.data?.id;
+      return isExport ? EXPORT_MEASURE_TYPES.has(mtId) : !EXPORT_MEASURE_TYPES.has(mtId);
+    });
+    const relevantIds = new Set(relevantMeasures.map(m=>m.id));
+    const conditions = included.filter(i=>i.type==="measure_condition"&&relevantIds.has(i.relationships?.measure?.data?.id));
+    const seen = new Set(); const codes = [];
+    conditions.forEach(mc=>{
+      const dc=mc.attributes?.document_code;
+      const desc=mc.attributes?.requirement||mc.attributes?.action?.description||"";
+      if(dc&&!seen.has(dc)&&dc.length<=5){seen.add(dc);codes.push({code:dc,value:"",description:desc,source:"TARIC"});}
+    });
+    return { description: d.data?.attributes?.description||"", codes };
+  } catch { return null; }
+}
+
+// ─── FIXED: readInvoiceAI with proper PDF/image handling and error surfacing ──
+async function readInvoiceAI(fileData, mimeType, fileName) {
+  const isPDF = mimeType === "application/pdf" || fileName?.toLowerCase().endsWith(".pdf");
+  const isImage = mimeType.startsWith("image/");
+
+  // Build the content block correctly based on file type
+  let fileContentBlock;
+  if (isPDF) {
+    // PDFs must be sent as "document" type, not "image"
+    fileContentBlock = {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "application/pdf",
+        data: fileData
+      }
+    };
+  } else if (isImage) {
+    fileContentBlock = {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: mimeType,
+        data: fileData
+      }
+    };
+  } else {
+    throw new Error(`Unsupported file type: ${mimeType}. Please upload a PDF or image.`);
+  }
+
+  const prompt = `You are a customs declaration expert. Extract ALL data from this commercial invoice for a customs declaration.
+
+Return ONLY a raw JSON object (no markdown, no backticks, no explanation). Use exactly this structure:
+
+{
+  "freightRef": "",
+  "invoiceNumber": "",
+  "supplierName": "",
+  "supplierAddress": "",
+  "supplierCity": "",
+  "supplierCountry": "",
+  "supplierPostcode": "",
+  "buyerName": "",
+  "buyerAddress": "",
+  "buyerCity": "",
+  "buyerCountry": "",
+  "buyerPostcode": "",
+  "currency": "",
+  "totalValue": 0,
+  "incoterms": "",
+  "transportRef": "",
+  "confidence": {
+    "freightRef": 0,
+    "invoiceNumber": 0,
+    "supplierName": 0,
+    "buyerName": 0,
+    "totalValue": 0,
+    "incoterms": 0
+  },
+  "items": [
+    {
+      "lineNumber": 1,
+      "description": "",
+      "commodityCode": "",
+      "originCountry": "",
+      "quantity": 0,
+      "unitPrice": 0,
+      "totalPrice": 0,
+      "grossWeightKg": 0,
+      "netWeightKg": 0,
+      "packageCount": 0,
+      "packageType": "",
+      "vinNumber": "",
+      "confidence": {
+        "description": 0,
+        "commodityCode": 0,
+        "originCountry": 0,
+        "grossWeightKg": 0,
+        "totalPrice": 0
+      }
+    }
+  ]
+}
+
+Rules:
+- freightRef = the freight/transport/job reference number (e.g. "FRE 827204"), NOT the invoice number
+- invoiceNumber = the invoice/document reference number
+- currency = 3-letter ISO code (GBP, EUR, USD, etc.)
+- totalValue = total invoice amount as a number
+- incoterms = delivery terms (EXW, FOB, CIF, DAP, DDP, etc.)
+- originCountry = 2-letter ISO country code (GB, IE, DE, etc.)
+- supplierCountry / buyerCountry = 2-letter ISO country code
+- commodityCode = HS/commodity code digits only
+- grossWeightKg / netWeightKg = convert to kg if in other units
+- confidence scores: 100=certain, 75=likely found, 50=unsure, 0=not found
+- Extract EVERY line item from the invoice
+- If a field is not found, use "" for strings and 0 for numbers`;
+
+  const requestBody = {
+    model: "claude-sonnet-4-6",
+    max_tokens: 4000,
+    messages: [{
+      role: "user",
+      content: [fileContentBlock, { type: "text", text: prompt }]
+    }]
+  };
+
+  const resp = await fetch("/api/claude", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(requestBody)
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`API request failed (${resp.status}): ${errText}`);
+  }
+
+  const data = await resp.json();
+
+  // Surface API-level errors
+  if (data.error) {
+    throw new Error(`Claude API error: ${data.error.message || JSON.stringify(data.error)}`);
+  }
+
+  const textBlock = data.content?.find(c => c.type === "text");
+  if (!textBlock) {
+    throw new Error(`No text response from Claude. Full response: ${JSON.stringify(data)}`);
+  }
+
+  const raw = textBlock.text.trim();
+
+  // Strip any accidental markdown fences
+  const cleaned = raw.replace(/^```json\s*/i,"").replace(/^```\s*/i,"").replace(/```\s*$/,"").trim();
+
+  try {
+    return JSON.parse(cleaned);
+  } catch(parseErr) {
+    throw new Error(`Could not parse Claude's response as JSON.\n\nResponse was:\n${raw.substring(0,500)}`);
+  }
+}
+
+function buildXML(declType, lrn, header, items) {
+  const allied = ALLIED[declType.jurisdiction];
+  const isImport = declType.type1==="IM";
+  const isIrish = declType.jurisdiction==="IE";
+  const totalGross = items.reduce((s,i)=>s+parseFloat(i.grossMass||0),0);
+  const office = header.officeIdentifier||(isIrish?"IEDUB100":"GB000080");
+
+  const b44 = (codes,useBox44) => (codes||[]).map(b=>useBox44
+    ? `      <Box44><Code>${escXML(b.code)}</Code><Value>${escXML(b.value)}</Value></Box44>`
+    : `      <SadAddDocs><IdentifierCode>${escXML(b.code)}</IdentifierCode><IdentifierQualifier>${escXML(b.value)}</IdentifierQualifier></SadAddDocs>`
+  ).join("\n");
+
+  const itemsXML = items.map((item,idx)=>{
+    if(isIrish&&isImport) return `  <AisImportItem>
+    <GoodsitemNumber>${idx+1}</GoodsitemNumber><ProcedureCode>${header.procedureCode}</ProcedureCode>
+    <AdditionalProcedure>${header.additionalProcedure||"000"}</AdditionalProcedure>
+    <GoodsDescription>${escXML(item.description)}</GoodsDescription>
+    <CommodityCode>${item.commodityCode.substring(0,8)}</CommodityCode>
+    <CommodityTaric>${item.commodityCode.length>=10?item.commodityCode.substring(8,10):"00"}</CommodityTaric>
+    <CountryOfOriginCode>${item.originCountry}</CountryOfOriginCode>
+    <GrossMass>${item.grossMass}</GrossMass><NetMass>${item.netMass||item.grossMass}</NetMass>
+    <ItemPriceAmount>${item.itemPrice}</ItemPriceAmount><Preference>${item.preference||"100"}</Preference>
+    <PackageDetail><Type>${item.packageType||"NE"}</Type><Quantity>${item.packageQty||1}</Quantity><ShippingMarks>${escXML(item.description)}</ShippingMarks></PackageDetail>
+    ${item.previousDoc?`<PreviousDocument><TypeA>Z</TypeA><TypeB>380</TypeB><TypeC>${escXML(item.previousDoc)}</TypeC></PreviousDocument>`:""}
+${b44(item.box44Codes,true)}
+  </AisImportItem>`;
+    if(isIrish&&!isImport) return `  <SadExportItem>
+    <PackageUniqueLineno>${idx+1}</PackageUniqueLineno><PackageQuantity>${item.packageQty||1}</PackageQuantity>
+    <PackageTypeCode>${item.packageType||"NE"}</PackageTypeCode><PackageMarkNumberText>${escXML(item.description)}</PackageMarkNumberText>
+    <DescriptionText>${escXML(item.description)}</DescriptionText><CommodityCode>${item.commodityCode.substring(0,8)}</CommodityCode>
+    <CountryOfOrigin>${item.originCountry}</CountryOfOrigin><GrossMass>${item.grossMass}</GrossMass>
+    <CustomsProcedureCode>${header.procedureCode}</CustomsProcedureCode><CustomsProcedureCategory>${header.additionalProcedure||"099"}</CustomsProcedureCategory>
+    <NetMass>${item.netMass||item.grossMass}</NetMass>
+    <PreviousCustomsDocRefA>Z</PreviousCustomsDocRefA><PreviousCustomsDocRefB>380</PreviousCustomsDocRefB>
+    <PreviousCustomsDocRefC>${escXML(item.previousDoc||header.jobRef)}</PreviousCustomsDocRefC>
+    <ItemPrice>${item.itemPrice}</ItemPrice>
+${b44(item.box44Codes,false)}
+  </SadExportItem>`;
+    return `  <AisImportItem>
+    <GoodsitemNumber>${idx+1}</GoodsitemNumber><ProcedureCode>${header.procedureCode}</ProcedureCode>
+    <AdditionalProcedure>${header.additionalProcedure||"000"}</AdditionalProcedure>
+    <GoodsDescription>${escXML(item.description)}</GoodsDescription>
+    <CommodityCode>${item.commodityCode.substring(0,8)}</CommodityCode>
+    <CommodityTaric>${item.commodityCode.length>=10?item.commodityCode.substring(8,10):"00"}</CommodityTaric>
+    <CountryOfOriginCode>${item.originCountry}</CountryOfOriginCode>
+    <GrossMass>${item.grossMass}</GrossMass><NetMass>${item.netMass||item.grossMass}</NetMass>
+    <ItemPriceAmount>${item.itemPrice}</ItemPriceAmount>
+    ${declType.id!=="CDS_EXPORT"?`<Preference>${item.preference||"100"}</Preference>`:""}
+    <PackageDetail><Type>${item.packageType||"NE"}</Type><Quantity>${item.packageQty||1}</Quantity><ShippingMarks>${escXML(item.description)}</ShippingMarks></PackageDetail>
+    ${item.previousDoc?`<PreviousDocument><TypeA>Z</TypeA><TypeB>380</TypeB><TypeC>${escXML(item.previousDoc)}</TypeC></PreviousDocument>`:""}
+${b44(item.box44Codes,false)}
+  </AisImportItem>`;
+  }).join("\n");
+
+  const dti = "\n  <CompleteUsingDti>Y</CompleteUsingDti>";
+
+  if(isIrish&&isImport) return `<?xml version="1.0" encoding="UTF-8"?>
+<AisImport>
+  <CompanyCode>TWM</CompanyCode><MessageType>H1</MessageType>
+  <DeclarationType>${declType.type1}</DeclarationType><AdditionalDeclarationType>${declType.type2}</AdditionalDeclarationType>
+  <Lrn>${lrn}</Lrn><UserCode>${escXML(header.submittedBy||"")}</UserCode>
+  <JobReference>${escXML(header.jobRef)}</JobReference>
+  <InvoiceCurrency>${header.currency}</InvoiceCurrency><TotalAmountInvoiced>${header.invoiceAmount}</TotalAmountInvoiced>
+  <GrossMass>${totalGross}</GrossMass><ModeOfTransportBorder>${header.transportMode}</ModeOfTransportBorder>
+  <NationalityMeansOfTransport>${header.transportNationality||""}</NationalityMeansOfTransport>
+  <CustomsOfficePresentation>${office}</CustomsOfficePresentation><OfficeImportExport>${office}</OfficeImportExport>
+  <ExporterName>${escXML(header.consignorName)}</ExporterName><ExporterCountry>${header.consignorCountry||"GB"}</ExporterCountry>
+  <DeclarantIdNo>${allied.eori}</DeclarantIdNo><DeclarantName>${allied.name}</DeclarantName>
+  <DeclarantStreetNumber>${allied.address}</DeclarantStreetNumber><DeclarantCountry>${allied.country}</DeclarantCountry>
+  <DeclarantPostcode>${allied.postcode}</DeclarantPostcode><DeclarantCity>${allied.city}</DeclarantCity>
+  <RepresentativeStatusCode>2</RepresentativeStatusCode>
+  <ImporterIdNo>${header.consigneeEori||""}</ImporterIdNo><ImporterName>${escXML(header.consigneeName)}</ImporterName>
+  <ImporterCountry>${header.consigneeCountry||"IE"}</ImporterCountry>
+  <DeliveryTermsIncoterm>${header.incoterm||""}</DeliveryTermsIncoterm>
+  <CountryOfDispatch>${header.countryDispatch||"GB"}</CountryOfDispatch>
+  <PaymentMethod>${header.paymentMethod||"E"}</PaymentMethod>${dti}
+${itemsXML}
+</AisImport>`;
+
+  if(isIrish&&!isImport) return `<?xml version="1.0" encoding="UTF-8"?>
+<SadExport>
+  <CompanyCode>TWM</CompanyCode><Lrn>${lrn}</Lrn>
+  <JobReference>${escXML(header.jobRef)}</JobReference>
+  <UserCode>${escXML(header.submittedBy||"")}</UserCode><OfficeIdentifier>${office}</OfficeIdentifier>
+  <DeclarationType1>${declType.type1}</DeclarationType1><DeclarationType2>${declType.type2}</DeclarationType2>
+  <ConsignorCodePrefix>EORI</ConsignorCodePrefix><ConsignorCode>${header.consignorEori||""}</ConsignorCode>
+  <ConsignorName>${escXML(header.consignorName)}</ConsignorName><ConsignorCountryCode>${header.consignorCountry||"IE"}</ConsignorCountryCode>
+  <ConsigneeCode>${header.consigneeEori||""}</ConsigneeCode><ConsigneeName>${escXML(header.consigneeName)}</ConsigneeName>
+  <ConsigneeCountryCode>${header.consigneeCountry||"GB"}</ConsigneeCountryCode>
+  <AgentStatus>2</AgentStatus><CountryOfDispatch>${header.countryDispatch||"IE"}</CountryOfDispatch>
+  <CountryOfDestination>${header.countryDestination||"GB"}</CountryOfDestination>
+  <CurrencyCode>${header.currency}</CurrencyCode><InvoiceAmount>${header.invoiceAmount}</InvoiceAmount>
+  <TransportModeBorder>${header.transportMode}</TransportModeBorder>
+  <TransportNationalityBorder>${header.transportNationality||""}</TransportNationalityBorder>
+  <CustomsOfficeEntryExit>${office}</CustomsOfficeEntryExit><LocationIdentifier>${office}</LocationIdentifier>${dti}
+${itemsXML}
+</SadExport>`;
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<AisImport>
+  <CompanyCode>TWM</CompanyCode><MessageType>${isImport?"H1":"EXA"}</MessageType>
+  <DeclarationType>${declType.type1}</DeclarationType><AdditionalDeclarationType>${declType.type2}</AdditionalDeclarationType>
+  <Lrn>${lrn}</Lrn><JobReference>${escXML(header.jobRef)}</JobReference>
+  <UserCode>${escXML(header.submittedBy||"")}</UserCode>
+  <InvoiceCurrency>${header.currency}</InvoiceCurrency><TotalAmountInvoiced>${header.invoiceAmount}</TotalAmountInvoiced>
+  <GrossMass>${totalGross}</GrossMass><OfficeImportExport>${office}</OfficeImportExport>
+  <ModeOfTransportBorder>${header.transportMode}</ModeOfTransportBorder>
+  <NationalityMeansOfTransport>${header.transportNationality||""}</NationalityMeansOfTransport>
+  <ExporterIdNo>${header.consignorEori||""}</ExporterIdNo><ExporterName>${escXML(header.consignorName)}</ExporterName>
+  <ExporterCountry>${header.consignorCountry||"IE"}</ExporterCountry>
+  <DeclarantIdNo>${allied.eori}</DeclarantIdNo><DeclarantName>${allied.name}</DeclarantName>
+  <RepresentativeStatusCode>2</RepresentativeStatusCode>
+  <ImporterIdNo>${header.consigneeEori||""}</ImporterIdNo><ImporterName>${escXML(header.consigneeName)}</ImporterName>
+  <ImporterCountry>${header.consigneeCountry||"GB"}</ImporterCountry>
+  <CountryOfDispatch>${header.countryDispatch||"IE"}</CountryOfDispatch>
+  <DeliveryTermsIncoterm>${header.incoterm||""}</DeliveryTermsIncoterm>${dti}
+${itemsXML}
+</AisImport>`;
+}
+
+function ConfBadge({ score }) {
+  if (score===undefined||score===null) return null;
+  const color = score>=75?"#22c55e":score>=50?"#eab308":"#ef4444";
+  const label = score>=75?"✓":score>=50?"?":"!";
+  return <span style={{display:"inline-block",width:16,height:16,borderRadius:"50%",background:`${color}22`,border:`1px solid ${color}66`,color,fontSize:9,fontWeight:800,textAlign:"center",lineHeight:"16px",marginLeft:4}}>{label}</span>;
+}
+
+function DeclarationTool() {
+  const [customers, setCustomers] = useState([]);
+  const [custStatus, setCustStatus] = useState("loading");
+  const [stage, setStage] = useState("type");
+  const [declType, setDeclType] = useState(null);
+  const [lrn, setLrn] = useState("");
+  const [header, setHeader] = useState({});
+  const [items, setItems] = useState([]);
+  const [custMatch, setCustMatch] = useState(null);
+  const [loading, setLoading] = useState("");
+  const [warnings, setWarnings] = useState([]);
+  const [error, setError] = useState("");
+  const [submitted, setSubmitted] = useState(null);
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem("allied_customers");
+      if (stored) {
+        const data = JSON.parse(stored);
+        if (data && data.length > 0) {
+          setCustomers(data);
+          setCustStatus("ready");
+          return;
+        }
+      }
+      setCustStatus("empty");
+    } catch {
+      setCustStatus("empty");
+    }
+  }, []);
+
+  function loadCustomerFile(file) {
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const wb = XLSX.read(e.target.result, { type: "binary" });
+      let all = [];
+      if (wb.SheetNames.includes("Sheet1")) {
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets["Sheet1"], { defval: "" });
+        rows.forEach(r => {
+          const name = String(r["consignor"]||"").trim();
+          const eori = String(r["eori"]||"").trim();
+          if (name && eori && eori !== "nan") all.push({ n: name, e: eori, c: eori.substring(0,2).toUpperCase() });
+        });
+      }
+      if (wb.SheetNames.includes("Sheet3")) {
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets["Sheet3"], { defval: "" });
+        rows.forEach(r => {
+          const name = String(r["NAME"]||"").trim();
+          const eori = String(r["EORI"]||"").trim();
+          if (name && eori && eori !== "N/R" && eori !== "nan") all.push({ n: name, e: eori, c: eori.substring(0,2).toUpperCase() });
+        });
+      }
+      if (wb.SheetNames.includes("Full List")) {
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets["Full List"], { defval: "" });
+        rows.forEach(r => {
+          const name = String(r["Customer"]||"").trim();
+          const eori = String(r["E"]||"").trim();
+          if (name && name !== "nan") all.push({ n: name, e: eori, c: eori.substring(0,2).toUpperCase() });
+        });
+      }
+      const seen = new Set();
+      const deduped = all.filter(c => { if (!c.n || seen.has(c.n.toLowerCase())) return false; seen.add(c.n.toLowerCase()); return true; });
+      try { localStorage.setItem("allied_customers", JSON.stringify(deduped)); } catch(e) {}
+      setCustomers(deduped);
+      setCustStatus("ready");
+    };
+    reader.readAsBinaryString(file);
+  }
+
+  function selectType(dt) {
+    setDeclType(dt);
+    setLrn(generateLRN());
+    setHeader({ procedureCode:dt.defaults.procedureCode, additionalProcedure:dt.defaults.additionalProcedure, paymentMethod:dt.defaults.paymentMethod, transportMode:dt.defaults.transportMode, currency:"GBP", officeIdentifier:"", transportNationality:"", incoterm:"", jobRef:"", submittedBy:"" });
+    setItems([]);
+    setCustMatch(null);
+    setWarnings([]);
+    setError("");
+    setStage("upload");
+  }
+
+  const processInvoice = useCallback(async (file) => {
+    setError("");
+    setLoading("Reading invoice...");
+
+    const isExcel = /\.(xlsx|xls)$/i.test(file.name);
+    const reader = new FileReader();
+
+    reader.onerror = () => {
+      setLoading("");
+      setError("Failed to read file. Please try again.");
+    };
+
+    reader.onload = async (e) => {
+      try {
+        let inv;
+
+        if (isExcel) {
+          const wb = XLSX.read(e.target.result, {type:"binary"});
+          const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {defval:""});
+          inv = {
+            freightRef: rows[0]?.["Freight Ref"]||rows[0]?.["Job Ref"]||"",
+            invoiceNumber: rows[0]?.["Invoice No"]||rows[0]?.["Ref"]||"",
+            supplierName: rows[0]?.["Supplier"]||rows[0]?.["From"]||"",
+            supplierCountry: rows[0]?.["Supplier Country"]||"",
+            buyerName: rows[0]?.["Customer"]||rows[0]?.["To"]||"",
+            buyerCountry: rows[0]?.["Customer Country"]||"",
+            currency: rows[0]?.["Currency"]||"GBP",
+            totalValue: rows.reduce((s,r)=>s+parseFloat(r["Total"]||r["Amount"]||0),0),
+            incoterms: rows[0]?.["Incoterms"]||"",
+            confidence: {freightRef:50,invoiceNumber:80,supplierName:80,buyerName:80,totalValue:80,incoterms:50},
+            items: rows.map((r,i)=>({
+              lineNumber:i+1, description:r["Description"]||r["Goods"]||"",
+              commodityCode:String(r["Commodity Code"]||r["HS Code"]||""),
+              originCountry:r["Origin"]||"", totalPrice:parseFloat(r["Total"]||r["Amount"]||0),
+              grossWeightKg:parseFloat(r["Gross Weight"]||r["Weight"]||0),
+              netWeightKg:parseFloat(r["Net Weight"]||0), packageCount:parseInt(r["Packages"]||1),
+              packageType:r["Package Type"]||"NE",
+              confidence:{description:80,commodityCode:50,originCountry:50,grossWeightKg:70,totalPrice:80}
+            })).filter(r=>r.description)
+          };
+        } else {
+          setLoading("AI reading invoice — please wait...");
+          // Get base64 from data URL
+          const base64 = e.target.result.split(",")[1];
+          const mimeType = file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg");
+          inv = await readInvoiceAI(base64, mimeType, file.name);
+        }
+
+        await buildFromInvoice(inv);
+      } catch(err) {
+        setLoading("");
+        setError(`❌ ${err.message}`);
+        console.error("Invoice processing error:", err);
+      }
+    };
+
+    // Always read as DataURL so we get base64 for PDFs and images
+    if (isExcel) {
+      reader.readAsBinaryString(file);
+    } else {
+      reader.readAsDataURL(file);
+    }
+  }, [declType, customers]);
+
+  async function buildFromInvoice(inv) {
+    const dt = declType;
+    const isImport = dt.type1==="IM";
+
+    setLoading("Matching customers...");
+    const sm = matchCustomer(inv.supplierName, customers);
+    const bm = matchCustomer(inv.buyerName, customers);
+    setCustMatch({ supplier:sm, buyer:bm });
+
+    const consignor = sm?.customer||{};
+    const consignee = bm?.customer||{};
+
+    setLoading("Checking TARIC codes...");
+    const defaultB44 = DEFAULT_BOX44[dt.id]||[];
+    const processedItems = await Promise.all((inv.items||[]).map(async (item) => {
+      let box44 = defaultB44.map(b=>({...b}));
+      if (item.commodityCode && String(item.commodityCode).replace(/\D/g,"").length>=6) {
+        const taric = await fetchTARIC(String(item.commodityCode), dt.id);
+        if (taric?.codes?.length) {
+          const ex = new Set(box44.map(b=>b.code));
+          taric.codes.filter(c=>!ex.has(c.code)).forEach(c=>box44.push(c));
+        }
+      }
+      box44 = box44.map(b=>
+        b.code==="N935"&&!b.value ? {...b,value:inv.invoiceNumber||""} :
+        b.code==="1D95"&&!b.value ? {...b,value:inv.transportRef||inv.freightRef||""} : b
+      );
+      if (item.vinNumber) box44.push({code:"1D97",value:item.vinNumber,description:"Vehicle ID",source:"invoice"});
+
+      return {
+        description: item.description||"",
+        commodityCode: String(item.commodityCode||""),
+        originCountry: item.originCountry||consignor.c||"",
+        grossMass: item.grossWeightKg||"",
+        netMass: item.netWeightKg||item.grossWeightKg||"",
+        itemPrice: item.totalPrice||"",
+        packageQty: item.packageCount||1,
+        packageType: item.packageType||"NE",
+        preference: dt.defaults.preference,
+        shippingMarks: item.description||"",
+        previousDoc: "",
+        box44Codes: box44,
+        confidence: item.confidence||{}
+      };
+    }));
+
+    const jobRef = isImport ? (inv.invoiceNumber||inv.freightRef||"") : (inv.freightRef||inv.invoiceNumber||"");
+
+    const warns = [];
+    if (!jobRef) warns.push({field:"Job/Freight Reference",msg:"Not found — enter manually"});
+    if ((inv.confidence?.totalValue||0)<75) warns.push({field:"Invoice Total",msg:"AI unsure — check"});
+    if ((inv.confidence?.incoterms||0)<50) warns.push({field:"Incoterms",msg:"Not found — select below"});
+    if (!sm) warns.push({field:"Consignor EORI",msg:"Not in customer database — enter manually"});
+    if (!bm) warns.push({field:"Consignee EORI",msg:"Not in customer database — enter manually"});
+    processedItems.forEach((item,i)=>{
+      if ((item.confidence?.commodityCode||0)<75) warns.push({field:`Item ${i+1} Commodity Code`,msg:"Unsure — verify"});
+      if ((item.confidence?.grossWeightKg||0)<50) warns.push({field:`Item ${i+1} Gross Weight`,msg:"Not clearly found"});
+    });
+
+    setWarnings(warns);
+    setHeader(h=>({...h,
+      jobRef,
+      currency: inv.currency||"GBP",
+      invoiceAmount: inv.totalValue||"",
+      incoterm: inv.incoterms||"",
+      countryDispatch: isImport ? (consignor.c||"GB") : (dt.jurisdiction==="IE"?"IE":"GB"),
+      countryDestination: isImport ? (dt.jurisdiction==="IE"?"IE":"GB") : (consignee.c||"GB"),
+      consignorName: inv.supplierName||"",
+      consignorEori: consignor.e||"",
+      consignorCountry: consignor.c||inv.supplierCountry||"",
+      consigneeName: inv.buyerName||"",
+      consigneeEori: consignee.e||"",
+      consigneeCountry: consignee.c||inv.buyerCountry||""
+    }));
+    setItems(processedItems);
+    setLoading("");
+    setStage("review");
+  }
+
+  function downloadXML() {
+    const xml = buildXML(declType, lrn, header, items);
+    const blob = new Blob([xml],{type:"application/xml"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${lrn}_${declType.id}.xml`;
+    a.click();
+    setSubmitted({lrn, timestamp:new Date().toLocaleString()});
+    setStage("submitted");
+  }
+
+  function startOver() { setStage("type"); setDeclType(null); setHeader({}); setItems([]); setLrn(""); setCustMatch(null); setWarnings([]); setError(""); setSubmitted(null); }
+  function upd(f,v) { setHeader(h=>({...h,[f]:v})); }
+  function updItem(i,f,v) { setItems(p=>p.map((it,idx)=>idx===i?{...it,[f]:v}:it)); }
+
+  const S = {
+    root: {fontFamily:"'Inter','Segoe UI',sans-serif",background:"#0d1117",minHeight:"100vh",color:"#e2e8f0"},
+    hdr: {background:"#161b27",borderBottom:"1px solid #1e2740",padding:"14px 28px",display:"flex",alignItems:"center",gap:12},
+    logo: {background:"linear-gradient(135deg,#1d4ed8,#6d28d9)",borderRadius:10,width:36,height:36,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0},
+    main: {maxWidth:980,margin:"0 auto",padding:"20px"},
+    card: {background:"#161b27",border:"1px solid #1e2740",borderRadius:14,padding:"18px 20px",marginBottom:12},
+    h2: {fontSize:14,fontWeight:700,marginBottom:12},
+    g2: {display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10},
+    g3: {display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10},
+    g4: {display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:10},
+    lbl: {fontSize:10,color:"#64748b",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.4px",marginBottom:3,display:"flex",alignItems:"center"},
+    inp: {background:"#0d1117",border:"1px solid #1e2740",borderRadius:7,color:"#e2e8f0",padding:"7px 10px",fontSize:12,outline:"none",width:"100%",boxSizing:"border-box"},
+    sel: {background:"#0d1117",border:"1px solid #1e2740",borderRadius:7,color:"#e2e8f0",padding:"7px 10px",fontSize:12,outline:"none",width:"100%",boxSizing:"border-box"},
+    bigBtn:{background:"linear-gradient(135deg,#16a34a,#15803d)",border:"none",borderRadius:12,color:"#fff",padding:"14px 32px",fontSize:15,fontWeight:800,cursor:"pointer",width:"100%"},
+    btn: {background:"linear-gradient(135deg,#1d4ed8,#5b21b6)",border:"none",borderRadius:8,color:"#fff",padding:"9px 18px",fontSize:13,fontWeight:700,cursor:"pointer"},
+    btnSm: {background:"#1e2740",border:"1px solid #2a3550",borderRadius:6,color:"#94a3b8",padding:"4px 9px",fontSize:11,cursor:"pointer"},
+    warn: {background:"rgba(234,179,8,0.08)",border:"1px solid rgba(234,179,8,0.25)",borderRadius:8,padding:"10px 14px",marginBottom:12},
+    err: {background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.35)",borderRadius:8,padding:"12px 16px",marginBottom:12,color:"#fca5a5",fontSize:13,fontFamily:"monospace",whiteSpace:"pre-wrap",wordBreak:"break-word"},
+    ok: {background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.25)",borderRadius:8,padding:"10px 14px",marginBottom:12},
+    info: {background:"rgba(99,102,241,0.08)",border:"1px solid rgba(99,102,241,0.25)",borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:12,color:"#a5b4fc"},
+    icard: {background:"#0d1117",border:"1px solid #1e2740",borderRadius:10,padding:"12px",marginBottom:8},
+  };
+
+  return (
+    <div style={S.root}>
+      <style>{`input:focus,select:focus{border-color:#3b82f6!important}`}</style>
+      <div style={S.hdr}>
+        <div style={S.logo}>⚡</div>
+        <div style={{flex:1}}>
+          <div style={{fontWeight:700,fontSize:15}}>One-Click Declaration — Allied Group</div>
+          <div style={{fontSize:11,color:"#475569"}}>
+            {custStatus==="ready" ? `✓ ${customers.length} customers loaded` : custStatus==="loading" ? "Loading customers..." : "⚠ No customer data — upload EORI file below"}
+            {" · Invoice → AI → TARIC → Thyme IT Draft"}
+          </div>
+        </div>
+        {stage!=="type" && <button style={S.btnSm} onClick={startOver}>+ New</button>}
+      </div>
+
+      <div style={S.main}>
+        {loading && (
+          <div style={{background:"rgba(99,102,241,0.1)",border:"1px solid rgba(99,102,241,0.3)",borderRadius:10,padding:"12px 16px",marginBottom:12,fontSize:13,color:"#a5b4fc",display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:18}}>⏳</span> {loading}
+          </div>
+        )}
+
+        {error && (
+          <div style={S.err}>
+            {error}
+            <div style={{marginTop:10}}>
+              <button style={{...S.btn,fontSize:11,padding:"5px 12px"}} onClick={()=>{setError("");setStage("upload");}}>Try Again</button>
+            </div>
+          </div>
+        )}
+
+        {custStatus==="empty" && (
+          <div style={{...S.warn,marginBottom:12}}>
+            <div style={{fontWeight:700,color:"#eab308",marginBottom:6}}>⚠ Customer EORI database not loaded</div>
+            <div style={{fontSize:12,color:"#fde68a",marginBottom:10}}>Upload your customer Excel file to enable automatic EORI matching</div>
+            <label>
+              <input type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={e=>{if(e.target.files[0])loadCustomerFile(e.target.files[0])}}/>
+              <span style={{...S.btn,display:"inline-block",cursor:"pointer"}}>Upload Customer EORI File</span>
+            </label>
+          </div>
+        )}
+
+        {stage==="type" && (
+          <div style={S.card}>
+            <div style={S.h2}>Select Declaration Type</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              {DECL_TYPES.map(dt=>(
+                <div key={dt.id} onClick={()=>selectType(dt)}
+                  style={{background:"#0d1117",border:"1px solid #1e2740",borderRadius:12,padding:"16px",cursor:"pointer"}}
+                  onMouseOver={e=>e.currentTarget.style.borderColor="#3b82f6"}
+                  onMouseOut={e=>e.currentTarget.style.borderColor="#1e2740"}>
+                  <div style={{fontSize:20,marginBottom:6}}>{dt.id.includes("IMPORT")?"📥":"📤"}</div>
+                  <div style={{fontWeight:700,fontSize:14,marginBottom:2}}>{dt.label}</div>
+                  <div style={{fontSize:11,color:"#475569"}}>Procedure {dt.defaults.procedureCode}{dt.defaults.preference?` · Preference ${dt.defaults.preference}`:""}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {stage==="upload" && (
+          <div style={S.card}>
+            <div style={S.h2}>Upload Invoice — {declType?.label}</div>
+            <div style={{border:"2px dashed #1e2740",borderRadius:12,padding:"44px",textAlign:"center",background:"#0d1117"}}
+              onDragOver={e=>{e.preventDefault();e.currentTarget.style.borderColor="#3b82f6"}}
+              onDragLeave={e=>e.currentTarget.style.borderColor="#1e2740"}
+              onDrop={e=>{e.preventDefault();e.currentTarget.style.borderColor="#1e2740";if(e.dataTransfer.files[0])processInvoice(e.dataTransfer.files[0])}}>
+              <div style={{fontSize:40,marginBottom:10}}>📄</div>
+              <div style={{fontWeight:700,fontSize:16,marginBottom:6}}>Drop invoice here</div>
+              <div style={{fontSize:12,color:"#64748b",marginBottom:6}}>PDF · Image · Excel — AI reads and extracts all data automatically</div>
+              <div style={{fontSize:11,color:"#475569",marginBottom:18}}>Supplier & buyer matched to EORI database · TARIC codes fetched · form pre-filled</div>
+              <label>
+                <input type="file" accept=".pdf,.jpg,.jpeg,.png,.xlsx,.xls" style={{display:"none"}}
+                  onChange={e=>{if(e.target.files[0])processInvoice(e.target.files[0])}}/>
+                <span style={{...S.btn,display:"inline-block",cursor:"pointer"}}>Choose Invoice File</span>
+              </label>
+            </div>
+          </div>
+        )}
+
+        {stage==="review" && (<>
+          <div style={S.info}>
+            <strong>ℹ What happens when you click Submit:</strong> Downloads XML file → place in Thyme IT API upload folder → declaration created as a <strong>DRAFT</strong> → staff reviews in Thyme IT → staff clicks Submit to send to Revenue. Nothing goes to Revenue automatically.
+          </div>
+
+          {warnings.length>0 ? (
+            <div style={S.warn}>
+              <div style={{fontWeight:700,color:"#eab308",marginBottom:6,fontSize:13}}>⚠ {warnings.length} field{warnings.length>1?"s":""} need attention:</div>
+              {warnings.map((w,i)=><div key={i} style={{fontSize:12,color:"#fde68a",marginBottom:2}}><strong>{w.field}</strong> — {w.msg}</div>)}
+            </div>
+          ):(
+            <div style={S.ok}><strong style={{color:"#22c55e"}}>✓ All fields extracted confidently.</strong> <span style={{fontSize:12,color:"#86efac",marginLeft:6}}>Review and click Submit.</span></div>
+          )}
+
+          {custMatch && (
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+              {[["Consignor",custMatch.supplier],["Consignee",custMatch.buyer]].map(([label,match])=>(
+                <div key={label} style={{background:"#161b27",border:`1px solid ${match?"rgba(34,197,94,0.3)":"rgba(239,68,68,0.3)"}`,borderRadius:10,padding:"10px 14px"}}>
+                  <div style={{color:"#64748b",fontSize:10,textTransform:"uppercase",marginBottom:3}}>{label}</div>
+                  {match
+                    ? <><div style={{color:"#22c55e",fontWeight:700,fontSize:12}}>✓ {match.customer.n}</div><div style={{color:"#64748b",fontSize:11}}>EORI: <strong style={{color:"#818cf8"}}>{match.customer.e}</strong> · {match.confidence}% match</div></>
+                    : <div style={{color:"#ef4444",fontSize:12}}>✗ Not found — enter EORI manually</div>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={S.card}>
+            <div style={S.h2}>{declType?.label} <span style={{fontSize:11,color:"#475569",fontWeight:400}}>· LRN: {lrn}</span></div>
+            <div style={S.g3}>
+              <div><label style={S.lbl}>Freight / Job Reference <span style={{color:"#ef4444",fontSize:10}}>required</span></label>
+                <input style={{...S.inp,borderColor:!header.jobRef?"#ef4444":"#1e2740"}} value={header.jobRef||""} onChange={e=>upd("jobRef",e.target.value)} placeholder="e.g. FRE 827204"/></div>
+              <div><label style={S.lbl}>Customs Office</label>
+                <select style={S.sel} value={header.officeIdentifier||""} onChange={e=>upd("officeIdentifier",e.target.value)}>
+                  <option value="">— Select port —</option>
+                  {IE_OFFICES.map(o=><option key={o.code} value={o.code}>{o.label}</option>)}
+                </select></div>
+              <div><label style={S.lbl}>Transport Nationality <span style={{color:"#ef4444",fontSize:10}}>required</span></label>
+                <input style={S.inp} value={header.transportNationality||""} maxLength={2} placeholder="e.g. MT GB IE" onChange={e=>upd("transportNationality",e.target.value.toUpperCase())}/></div>
+            </div>
+            <div style={S.g4}>
+              <div><label style={S.lbl}>Consignor</label><input style={S.inp} value={header.consignorName||""} onChange={e=>upd("consignorName",e.target.value)}/></div>
+              <div><label style={S.lbl}>Consignor EORI</label><input style={{...S.inp,borderColor:!header.consignorEori?"#ef4444":"#1e2740"}} value={header.consignorEori||""} onChange={e=>upd("consignorEori",e.target.value)}/></div>
+              <div><label style={S.lbl}>Consignee</label><input style={S.inp} value={header.consigneeName||""} onChange={e=>upd("consigneeName",e.target.value)}/></div>
+              <div><label style={S.lbl}>Consignee EORI</label><input style={{...S.inp,borderColor:!header.consigneeEori?"#ef4444":"#1e2740"}} value={header.consigneeEori||""} onChange={e=>upd("consigneeEori",e.target.value)}/></div>
+            </div>
+            <div style={S.g4}>
+              <div><label style={S.lbl}>Currency</label>
+                <select style={S.sel} value={header.currency||"GBP"} onChange={e=>upd("currency",e.target.value)}>
+                  {["GBP","EUR","USD","CHF","DKK","SEK","NOK"].map(c=><option key={c}>{c}</option>)}
+                </select></div>
+              <div><label style={S.lbl}>Invoice Amount</label><input style={S.inp} type="number" value={header.invoiceAmount||""} onChange={e=>upd("invoiceAmount",e.target.value)}/></div>
+              <div><label style={S.lbl}>Incoterms</label>
+                <select style={S.sel} value={header.incoterm||""} onChange={e=>upd("incoterm",e.target.value)}>
+                  <option value="">— Select —</option>
+                  {["EXW","FOB","CIF","DAP","DDP","FCA","CPT","CIP","DPU","CFR","FAS"].map(i=><option key={i}>{i}</option>)}
+                </select></div>
+              <div><label style={S.lbl}>Submitted By</label><input style={S.inp} value={header.submittedBy||""} onChange={e=>upd("submittedBy",e.target.value)} placeholder="Staff name"/></div>
+            </div>
+          </div>
+
+          <div style={S.card}>
+            <div style={S.h2}>Goods Items ({items.length})</div>
+            {items.length===0 && <div style={{color:"#64748b",fontSize:13,fontStyle:"italic"}}>No items extracted — check your invoice file and try again</div>}
+            {items.map((item,idx)=>(
+              <div key={idx} style={S.icard}>
+                <div style={{fontWeight:700,fontSize:12,color:"#818cf8",marginBottom:8}}>Item {idx+1}</div>
+                <div style={S.g3}>
+                  <div style={{gridColumn:"span 2"}}><label style={S.lbl}>Description <ConfBadge score={item.confidence?.description}/></label>
+                    <input style={S.inp} value={item.description} onChange={e=>updItem(idx,"description",e.target.value)}/></div>
+                  <div><label style={S.lbl}>Commodity Code <ConfBadge score={item.confidence?.commodityCode}/></label>
+                    <input style={{...S.inp,borderColor:(item.confidence?.commodityCode||0)<75?"#eab308":"#1e2740"}} value={item.commodityCode} onChange={e=>updItem(idx,"commodityCode",e.target.value)}/></div>
+                </div>
+                <div style={S.g4}>
+                  <div><label style={S.lbl}>Origin <ConfBadge score={item.confidence?.originCountry}/></label>
+                    <input style={S.inp} value={item.originCountry} maxLength={2} onChange={e=>updItem(idx,"originCountry",e.target.value.toUpperCase())}/></div>
+                  <div><label style={S.lbl}>Gross Mass kg <ConfBadge score={item.confidence?.grossWeightKg}/></label>
+                    <input style={{...S.inp,borderColor:(item.confidence?.grossWeightKg||0)<50?"#ef4444":"#1e2740"}} type="number" value={item.grossMass} onChange={e=>updItem(idx,"grossMass",e.target.value)}/></div>
+                  <div><label style={S.lbl}>Item Price <ConfBadge score={item.confidence?.totalPrice}/></label>
+                    <input style={S.inp} type="number" value={item.itemPrice} onChange={e=>updItem(idx,"itemPrice",e.target.value)}/></div>
+                  <div><label style={S.lbl}>Packages</label>
+                    <input style={S.inp} type="number" value={item.packageQty} onChange={e=>updItem(idx,"packageQty",e.target.value)}/></div>
+                </div>
+                <div style={{fontSize:11,color:"#64748b",marginTop:4}}>
+                  Box 44 ({item.box44Codes?.length||0}):&nbsp;
+                  {(item.box44Codes||[]).map(b=>(
+                    <span key={b.code} title={b.description} style={{marginRight:6,fontWeight:600,color:b.source==="TARIC"?"#818cf8":b.source==="invoice"?"#22c55e":"#64748b"}}>
+                      {b.code}{b.value?" "+b.value:""}
+                    </span>
+                  ))}
+                  {!(item.box44Codes?.length) && <span style={{fontStyle:"italic"}}>None required</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div>
+            <button
+              style={{...S.bigBtn,opacity:(!header.jobRef||!header.invoiceAmount)?0.5:1}}
+              onClick={downloadXML}
+              disabled={!header.jobRef||!header.invoiceAmount}>
+              ⬇ DOWNLOAD XML — Place in Thyme IT upload folder
+            </button>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:8}}>
+              {[["1","Download XML above"],["2","Drop in Thyme IT API upload folder"],["3","Declaration appears as DRAFT — staff reviews & submits"]].map(([n,t])=>(
+                <div key={n} style={{background:"#161b27",border:"1px solid #1e2740",borderRadius:8,padding:"8px 10px",fontSize:11,color:"#64748b"}}>
+                  <strong style={{color:"#e2e8f0"}}>Step {n}</strong><br/>{t}
+                </div>
+              ))}
+            </div>
+          </div>
+        </>)}
+
+        {stage==="submitted" && (
+          <div style={S.card}>
+            <div style={{textAlign:"center",padding:"32px 20px"}}>
+              <div style={{fontSize:56,marginBottom:14}}>✅</div>
+              <div style={{fontSize:22,fontWeight:800,marginBottom:6}}>XML Downloaded</div>
+              <div style={{fontSize:13,color:"#64748b",marginBottom:20}}>LRN: <strong style={{color:"#818cf8"}}>{submitted?.lrn}</strong> · {submitted?.timestamp}</div>
+              <div style={{background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.2)",borderRadius:10,padding:"12px",marginBottom:16,fontSize:12,color:"#86efac",textAlign:"left"}}>
+                <div>✓ XML downloaded to your computer</div>
+                <div>✓ Drop in Thyme IT API upload folder → creates as DRAFT</div>
+                <div>✓ Staff reviews in Thyme IT then clicks Submit to Revenue</div>
+                <div>✓ LRN: <strong>{submitted?.lrn}</strong></div>
+              </div>
+              <button style={S.bigBtn} onClick={startOver}>+ New Declaration</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<DeclarationTool />);
+</script>
+</body>
+</html>
