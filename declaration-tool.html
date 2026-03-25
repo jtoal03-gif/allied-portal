@@ -38,8 +38,9 @@ async function logCorrectionToConvex(data) {
 }
 
 // ─── Allied Group Details ─────────────────────────────────────────────────────
+// XI EORI for Irish/EU declarations, GB EORI for UK declarations
 const ALLIED = {
-  IE: { eori: "IE3717281MH", name: "Allied Group Limited", address: "Edenaveys Industrial Estate", city: "Armagh", postcode: "BT60 1NF", country: "IE" },
+  IE: { eori: "XI275077974000", name: "Allied Group Limited", address: "Edenaveys Industrial Estate", city: "Armagh", postcode: "BT60 1NF", country: "IE" },
   GB: { eori: "GB275077974000", name: "Allied Group Limited", address: "Formation works, 2 Edenaveys Ind Es", city: "Armagh", postcode: "BT60 1HF", country: "IE" },
 };
 
@@ -594,6 +595,27 @@ function DeclarationTool() {
       };
     }));
 
+    // ─── Consolidate lines: same commodity code + same origin = one line ─────
+    const consolidatedItems = [];
+    for (const item of processedItems) {
+      const key = `${String(item.commodityCode).replace(/\D/g,"").substring(0,10)}__${item.originCountry.toUpperCase()}`;
+      const existing = consolidatedItems.find(i =>
+        `${String(i.commodityCode).replace(/\D/g,"").substring(0,10)}__${i.originCountry.toUpperCase()}` === key
+      );
+      if (existing) {
+        existing.grossMass = (parseFloat(existing.grossMass)||0) + (parseFloat(item.grossMass)||0);
+        existing.netMass = (parseFloat(existing.netMass)||0) + (parseFloat(item.netMass)||0);
+        existing.itemPrice = (parseFloat(existing.itemPrice)||0) + (parseFloat(item.itemPrice)||0);
+        existing.packageQty = (parseInt(existing.packageQty)||0) + (parseInt(item.packageQty)||0);
+        // Merge descriptions if different
+        if (item.description && !existing.description.includes(item.description)) {
+          existing.description = existing.description + " / " + item.description;
+        }
+      } else {
+        consolidatedItems.push({...item});
+      }
+    }
+
     const jobRef = isImport ? (inv.invoiceNumber||inv.freightRef||"") : (inv.freightRef||inv.invoiceNumber||"");
 
     const warns = [];
@@ -602,7 +624,7 @@ function DeclarationTool() {
     if ((inv.confidence?.incoterms||0)<50) warns.push({field:"Incoterms",msg:"Not found — select below"});
     if (!sm) warns.push({field:"Consignor EORI",msg:"Not in customer database — enter manually"});
     if (!bm) warns.push({field:"Consignee EORI",msg:"Not in customer database — enter manually"});
-    processedItems.forEach((item,i)=>{
+    consolidatedItems.forEach((item,i)=>{
       if ((item.confidence?.commodityCode||0)<75) warns.push({field:`Item ${i+1} Commodity Code`,msg:"Unsure — verify"});
       if ((item.confidence?.grossWeightKg||0)<50) warns.push({field:`Item ${i+1} Gross Weight`,msg:"Not clearly found"});
     });
@@ -622,18 +644,84 @@ function DeclarationTool() {
       consigneeEori: consignee.e||"",
       consigneeCountry: consignee.c||inv.buyerCountry||""
     }));
-    setItems(processedItems);
+    setItems(consolidatedItems);
     setLoading("");
     setStage("review");
   }
 
-  function downloadXML() {
-    const xml = buildXML(declType, lrn, header, items);
-    const blob = new Blob([xml],{type:"application/xml"});
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `${lrn}_${declType.id}.xml`;
-    a.click();
+  function downloadExcel() {
+    const allied = ALLIED[declType.jurisdiction];
+    const isImport = declType.type1 === "IM";
+    const isIrish = declType.jurisdiction === "IE";
+    const office = header.officeIdentifier || (isIrish ? "IEDUB100" : "GB000080");
+
+    const headers = [
+      "TemplateId1","TemplateId2","TraderReference","JobReference","DeclarationType1",
+      "TransportModeInland","TransportNationalityBorder","BX-M-N705",
+      "ConsignorName","ConsignorAddress","ConsignorCity","ConsignorPostcode","ConsignorCountryCode","ConsignorCodePrefix",
+      "ConsigneeCode","ConsigneeName","ConsigneeAddress","ConsigneeCity","ConsigneePostcode","ConsigneeCountryCode",
+      "PersonPayingCustomsDuty","InvoiceAmount","CurrencyCode","DeliveryCode",
+      "CountryOfDispatch","CountryOfDestination","OfficeImportExport","LocationIdentifier",
+      "TransportIdentityBorder","CustomsOfficeEntryExit","TransportModeBorder",
+      "CountryOfOrigin","PreferenceCode","IE-BX-I-U116",
+      "GrossMass","NetMass","ProcedureCode",
+      "ItemPackageQuantity","ItemPackageTypeCode","ItemMarksOfThePackage",
+      "CommodityCode","CommodityTaric","SupplementaryUnits","TaricQuantityUom",
+      "GoodsDescription",
+      "IE-BX-I-Y922","IE-BX-I-Y923","IE-BX-I-Y904","IE-BX-I-Y799","IE-BX-I-Y949",
+      "IE-BX-I-Y069","IE-BX-I-Y106","IE-BX-I-Y054","IE-BX-I-Y929","IE-BX-I-Y930",
+      "IE-BX-I-Y032","IE-BX-I-Y790","IE-BX-I-Y160","IE-BX-I-Y792",
+      "PreviousCustomsDocumentA","PreviousCustomsDocumentB","PreviousCustomsDocumentC",
+      "ItemPrice","BX-I-N935"
+    ];
+
+    const rows = items.map((item) => {
+      const commodityFull = String(item.commodityCode||"").replace(/\D/g,"").padEnd(10,"0");
+      const commodity8 = commodityFull.substring(0,8);
+      const commodityTaric = commodityFull.substring(8,10);
+      const NAI = "NAI";
+      return [
+        isIrish ? 4802 : 4801, null,
+        header.jobRef||"", header.jobRef||"",
+        declType.type1,
+        parseInt(header.transportMode)||1,
+        header.transportNationality||"",
+        "",
+        header.consignorName||"", "","","",
+        header.consignorCountry||"GB", "EOR",
+        header.consigneeEori||"", header.consigneeName||"", "","","",
+        header.consigneeCountry||"IE",
+        allied.eori,
+        parseFloat(header.invoiceAmount)||0,
+        header.currency||"GBP",
+        header.incoterm||"",
+        header.countryDispatch||"GB",
+        header.countryDestination||(isIrish?"IE":"GB"),
+        office, office, "", office,
+        parseInt(header.transportMode)||1,
+        item.originCountry||"",
+        item.preference||"100",
+        null,
+        parseFloat(item.grossMass)||0,
+        parseFloat(item.netMass||item.grossMass)||0,
+        header.procedureCode||"4000",
+        parseInt(item.packageQty)||1,
+        item.packageType||"pk",
+        "as addressed",
+        commodity8, commodityTaric,
+        parseInt(item.packageQty)||1, null,
+        item.description||"",
+        NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,
+        null,null,null,
+        parseFloat(item.itemPrice)||0,
+        header.jobRef||""
+      ];
+    });
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+    XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
+    XLSX.writeFile(wb, `${lrn}_${declType.id}_ThymeIT.xlsx`);
     setSubmitted({lrn, timestamp:new Date().toLocaleString()});
     setStage("submitted");
   }
@@ -844,12 +932,12 @@ function DeclarationTool() {
           <div>
             <button
               style={{...S.bigBtn,opacity:(!header.jobRef||!header.invoiceAmount)?0.5:1}}
-              onClick={downloadXML}
+              onClick={downloadExcel}
               disabled={!header.jobRef||!header.invoiceAmount}>
-              ⬇ DOWNLOAD XML — Place in Thyme IT upload folder
+              ⬇ DOWNLOAD EXCEL — Upload to Thyme IT
             </button>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:8}}>
-              {[["1","Download XML above"],["2","Drop in Thyme IT API upload folder"],["3","Declaration appears as DRAFT — staff reviews & submits"]].map(([n,t])=>(
+              {[["1","Download Excel file above"],["2","Upload Excel into Thyme IT document upload"],["3","Declaration created in Thyme IT — staff reviews & submits"]].map(([n,t])=>(
                 <div key={n} style={{background:"#161b27",border:"1px solid #1e2740",borderRadius:8,padding:"8px 10px",fontSize:11,color:"#64748b"}}>
                   <strong style={{color:"#e2e8f0"}}>Step {n}</strong><br/>{t}
                 </div>
@@ -865,8 +953,8 @@ function DeclarationTool() {
               <div style={{fontSize:22,fontWeight:800,marginBottom:6}}>XML Downloaded</div>
               <div style={{fontSize:13,color:"#64748b",marginBottom:20}}>LRN: <strong style={{color:"#818cf8"}}>{submitted?.lrn}</strong> · {submitted?.timestamp}</div>
               <div style={{background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.2)",borderRadius:10,padding:"12px",marginBottom:16,fontSize:12,color:"#86efac",textAlign:"left"}}>
-                <div>✓ XML downloaded to your computer</div>
-                <div>✓ Drop in Thyme IT API upload folder → creates as DRAFT</div>
+                <div>✓ Excel file downloaded to your computer</div>
+                <div>✓ Upload Excel into Thyme IT document upload facility</div>
                 <div>✓ Staff reviews in Thyme IT then clicks Submit to Revenue</div>
                 <div>✓ LRN: <strong>{submitted?.lrn}</strong></div>
               </div>
