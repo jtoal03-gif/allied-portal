@@ -649,7 +649,7 @@ function DeclarationTool() {
     setStage("review");
   }
 
-  function downloadExcel() {
+  async function downloadExcel() {
     const allied = ALLIED[declType.jurisdiction];
     const isImport = declType.type1 === "IM";
     const isIrish = declType.jurisdiction === "IE";
@@ -718,11 +718,44 @@ function DeclarationTool() {
       ];
     });
 
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-    XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
-    XLSX.writeFile(wb, `${lrn}_${declType.id}_ThymeIT.xlsx`);
-    setSubmitted({lrn, timestamp:new Date().toLocaleString()});
+    // ── Split into chunks of 99 lines max ──────────────────────────────
+    const CHUNK = 99;
+    const totalFiles = Math.ceil(rows.length / CHUNK);
+
+    if (totalFiles <= 1) {
+      // Single file — no suffix on job ref
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+      XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
+      XLSX.writeFile(wb, `${lrn}_${declType.id}_ThymeIT.xlsx`);
+    } else {
+      // Multiple files — update job ref and LRN per chunk
+      for (let i = 0; i < totalFiles; i++) {
+        const chunkRows = rows.slice(i * CHUNK, (i + 1) * CHUNK);
+        const suffix = ` ${i + 1} of ${totalFiles}`;
+        const chunkLRN = lrn + `_${i + 1}`;
+        const baseJobRef = header.jobRef||"";
+
+        // Update TraderReference (col 2), JobReference (col 3), BX-I-N935 (last col) per row
+        const updatedRows = chunkRows.map(row => {
+          const r = [...row];
+          r[2] = baseJobRef + suffix;  // TraderReference
+          r[3] = baseJobRef + suffix;  // JobReference
+          r[r.length - 1] = baseJobRef + suffix; // BX-I-N935
+          return r;
+        });
+
+        const wb = XLSX.utils.book_new();
+        const ws = XLSX.utils.aoa_to_sheet([headers, ...updatedRows]);
+        XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
+        XLSX.writeFile(wb, `${chunkLRN}_${declType.id}_ThymeIT_${i+1}of${totalFiles}.xlsx`);
+
+        // Small delay between downloads so browser doesn't block them
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+
+    setSubmitted({lrn, totalFiles, timestamp:new Date().toLocaleString()});
     setStage("submitted");
   }
 
@@ -953,8 +986,11 @@ function DeclarationTool() {
               <div style={{fontSize:22,fontWeight:800,marginBottom:6}}>XML Downloaded</div>
               <div style={{fontSize:13,color:"#64748b",marginBottom:20}}>LRN: <strong style={{color:"#818cf8"}}>{submitted?.lrn}</strong> · {submitted?.timestamp}</div>
               <div style={{background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.2)",borderRadius:10,padding:"12px",marginBottom:16,fontSize:12,color:"#86efac",textAlign:"left"}}>
-                <div>✓ Excel file downloaded to your computer</div>
-                <div>✓ Upload Excel into Thyme IT document upload facility</div>
+                {submitted?.totalFiles > 1
+                  ? <div>✓ <strong>{submitted?.totalFiles} Excel files</strong> downloaded — job split due to 99-line limit</div>
+                  : <div>✓ Excel file downloaded to your computer</div>
+                }
+                <div>✓ Upload Excel file(s) into Thyme IT document upload facility</div>
                 <div>✓ Staff reviews in Thyme IT then clicks Submit to Revenue</div>
                 <div>✓ LRN: <strong>{submitted?.lrn}</strong></div>
               </div>
