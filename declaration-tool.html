@@ -8,6 +8,7 @@
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
@@ -136,111 +137,51 @@ async function fetchTARIC(code, declTypeId) {
   } catch { return null; }
 }
 
-// ─── FIXED: readInvoiceAI with proper PDF/image handling and error surfacing ──
-async function readInvoiceAI(fileData, mimeType, fileName) {
-  const isPDF = mimeType === "application/pdf" || fileName?.toLowerCase().endsWith(".pdf");
-  const isImage = mimeType.startsWith("image/");
-
-  // Build the content block correctly based on file type
-  let fileContentBlock;
-  if (isPDF) {
-    // PDFs must be sent as "document" type, not "image"
-    fileContentBlock = {
-      type: "document",
-      source: {
-        type: "base64",
-        media_type: "application/pdf",
-        data: fileData
-      }
-    };
-  } else if (isImage) {
-    fileContentBlock = {
-      type: "image",
-      source: {
-        type: "base64",
-        media_type: mimeType,
-        data: fileData
-      }
-    };
-  } else {
-    throw new Error(`Unsupported file type: ${mimeType}. Please upload a PDF or image.`);
+// ─── PDF text extraction using PDF.js ────────────────────────────────────────
+async function extractTextFromPDF(arrayBuffer) {
+  const pdfjsLib = window['pdfjs-dist/build/pdf'];
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let fullText = '';
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items.map(item => item.str).join(' ');
+    fullText += pageText + '\n';
   }
+  return fullText;
+}
 
-  const prompt = `You are a customs declaration expert. Extract ALL data from this commercial invoice for a customs declaration.
+// ─── readInvoiceAI — sends text to Claude (no token limit issues) ─────────────
+async function readInvoiceAI(text) {
+  const prompt = `You are a customs declaration expert. Extract ALL data from this commercial invoice text for a customs declaration.
 
 Return ONLY a raw JSON object (no markdown, no backticks, no explanation). Use exactly this structure:
 
-{
-  "freightRef": "",
-  "invoiceNumber": "",
-  "supplierName": "",
-  "supplierAddress": "",
-  "supplierCity": "",
-  "supplierCountry": "",
-  "supplierPostcode": "",
-  "buyerName": "",
-  "buyerAddress": "",
-  "buyerCity": "",
-  "buyerCountry": "",
-  "buyerPostcode": "",
-  "currency": "",
-  "totalValue": 0,
-  "incoterms": "",
-  "transportRef": "",
-  "confidence": {
-    "freightRef": 0,
-    "invoiceNumber": 0,
-    "supplierName": 0,
-    "buyerName": 0,
-    "totalValue": 0,
-    "incoterms": 0
-  },
-  "items": [
-    {
-      "lineNumber": 1,
-      "description": "",
-      "commodityCode": "",
-      "originCountry": "",
-      "quantity": 0,
-      "unitPrice": 0,
-      "totalPrice": 0,
-      "grossWeightKg": 0,
-      "netWeightKg": 0,
-      "packageCount": 0,
-      "packageType": "",
-      "vinNumber": "",
-      "confidence": {
-        "description": 0,
-        "commodityCode": 0,
-        "originCountry": 0,
-        "grossWeightKg": 0,
-        "totalPrice": 0
-      }
-    }
-  ]
-}
+{"freightRef":"","invoiceNumber":"","supplierName":"","supplierAddress":"","supplierCity":"","supplierCountry":"","supplierPostcode":"","buyerName":"","buyerAddress":"","buyerCity":"","buyerCountry":"","buyerPostcode":"","currency":"","totalValue":0,"incoterms":"","transportRef":"","confidence":{"freightRef":0,"invoiceNumber":0,"supplierName":0,"buyerName":0,"totalValue":0,"incoterms":0},"items":[{"lineNumber":1,"description":"","commodityCode":"","originCountry":"","quantity":0,"unitPrice":0,"totalPrice":0,"grossWeightKg":0,"netWeightKg":0,"packageCount":0,"packageType":"","vinNumber":"","confidence":{"description":0,"commodityCode":0,"originCountry":0,"grossWeightKg":0,"totalPrice":0}}]}
 
 Rules:
-- freightRef = the freight/transport/job reference number (e.g. "FRE 827204"), NOT the invoice number
-- invoiceNumber = the invoice/document reference number
+- freightRef = freight/transport/job reference (e.g. "FRE 827204" or "S-197"), NOT the invoice number
+- invoiceNumber = invoice/document reference number (e.g. "PSI453016")
 - currency = 3-letter ISO code (GBP, EUR, USD, etc.)
 - totalValue = total invoice amount as a number
 - incoterms = delivery terms (EXW, FOB, CIF, DAP, DDP, etc.)
-- originCountry = 2-letter ISO country code (GB, IE, DE, etc.)
+- originCountry = 2-letter ISO country code (GB, IE, DE, CN, US, etc.)
 - supplierCountry / buyerCountry = 2-letter ISO country code
-- commodityCode = HS/commodity code digits only
-- grossWeightKg / netWeightKg = convert to kg if in other units
-- confidence scores: 100=certain, 75=likely found, 50=unsure, 0=not found
-- Extract EVERY line item from the invoice
-- If a field is not found, use "" for strings and 0 for numbers`;
+- commodityCode = use the IMPORT commodity code if both export and import codes are present (the 10-digit import code), digits only
+- grossWeightKg / netWeightKg = convert to kg if needed
+- totalPrice = the nett amount / line total value for this item
+- confidence scores: 100=certain, 75=likely, 50=unsure, 0=not found
+- Extract EVERY line item from the invoice — do not skip any
+- If a field is not found, use "" for strings and 0 for numbers
+
+INVOICE TEXT:
+${text.substring(0, 80000)}`;
 
   const requestBody = {
     model: "claude-sonnet-4-6",
-    max_tokens: 4000,
-    messages: [{
-      role: "user",
-      content: [fileContentBlock, { type: "text", text: prompt }]
-    }]
+    max_tokens: 8000,
+    messages: [{ role: "user", content: prompt }]
   };
 
   const resp = await fetch("/api/claude", {
@@ -256,7 +197,6 @@ Rules:
 
   const data = await resp.json();
 
-  // Surface API-level errors
   if (data.error) {
     throw new Error(`Claude API error: ${data.error.message || JSON.stringify(data.error)}`);
   }
@@ -267,16 +207,48 @@ Rules:
   }
 
   const raw = textBlock.text.trim();
-
-  // Strip any accidental markdown fences
   const cleaned = raw.replace(/^```json\s*/i,"").replace(/^```\s*/i,"").replace(/```\s*$/,"").trim();
 
   try {
     return JSON.parse(cleaned);
   } catch(parseErr) {
-    throw new Error(`Could not parse Claude's response as JSON.\n\nResponse was:\n${raw.substring(0,500)}`);
+    throw new Error(`Could not parse Claude response as JSON.\n\nResponse was:\n${raw.substring(0,500)}`);
   }
 }
+
+
+// ─── Fallback for image invoices ─────────────────────────────────────────────
+async function readInvoiceAI_image(base64, mimeType) {
+  const prompt = `You are a customs declaration expert. Extract ALL data from this commercial invoice image.
+
+Return ONLY a raw JSON object (no markdown, no backticks, no explanation). Use exactly this structure:
+{"freightRef":"","invoiceNumber":"","supplierName":"","supplierCountry":"","buyerName":"","buyerCountry":"","currency":"","totalValue":0,"incoterms":"","transportRef":"","confidence":{"freightRef":0,"invoiceNumber":0,"supplierName":0,"buyerName":0,"totalValue":0,"incoterms":0},"items":[{"lineNumber":1,"description":"","commodityCode":"","originCountry":"","quantity":0,"unitPrice":0,"totalPrice":0,"grossWeightKg":0,"netWeightKg":0,"packageCount":1,"packageType":"","confidence":{"description":0,"commodityCode":0,"originCountry":0,"grossWeightKg":0,"totalPrice":0}}]}
+
+Rules: commodityCode=import code digits only, originCountry=2-letter ISO, currency=3-letter ISO, confidence 100=certain/75=likely/50=unsure/0=not found, extract every line item.`;
+
+  const resp = await fetch("/api/claude", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 4000,
+      messages: [{ role: "user", content: [
+        { type: "image", source: { type: "base64", media_type: mimeType, data: base64 } },
+        { type: "text", text: prompt }
+      ]}]
+    })
+  });
+
+  if (!resp.ok) throw new Error(`API request failed (${resp.status}): ${await resp.text()}`);
+  const data = await resp.json();
+  if (data.error) throw new Error(`Claude API error: ${data.error.message || JSON.stringify(data.error)}`);
+  const textBlock = data.content?.find(c => c.type === "text");
+  if (!textBlock) throw new Error("No response from Claude");
+  const raw = textBlock.text.trim();
+  const cleaned = raw.replace(/^```json\s*/i,"").replace(/^```\s*/i,"").replace(/```\s*$/,"").trim();
+  return JSON.parse(cleaned);
+}
+
 
 function buildXML(declType, lrn, header, items) {
   const allied = ALLIED[declType.jurisdiction];
@@ -526,11 +498,25 @@ function DeclarationTool() {
             })).filter(r=>r.description)
           };
         } else {
-          setLoading("AI reading invoice — please wait...");
-          // Get base64 from data URL
-          const base64 = e.target.result.split(",")[1];
-          const mimeType = file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg");
-          inv = await readInvoiceAI(base64, mimeType, file.name);
+          const isPDF = /\.pdf$/i.test(file.name) || file.type === "application/pdf";
+          const isImage = file.type.startsWith("image/");
+
+          if (isPDF) {
+            setLoading("Extracting text from PDF...");
+            const text = await extractTextFromPDF(e.target.result);
+            if (!text || text.trim().length < 50) {
+              throw new Error("Could not extract text from PDF. The PDF may be a scanned image. Please try uploading as an image (JPG/PNG) instead.");
+            }
+            setLoading(`AI reading invoice (${text.length.toLocaleString()} characters extracted)...`);
+            inv = await readInvoiceAI(text);
+          } else if (isImage) {
+            setLoading("AI reading invoice image — please wait...");
+            // Images: send as base64 vision (they are usually small enough)
+            const base64 = e.target.result.split(",")[1];
+            inv = await readInvoiceAI_image(base64, file.type);
+          } else {
+            throw new Error("Unsupported file type. Please upload a PDF, image (JPG/PNG), or Excel file.");
+          }
         }
 
         await buildFromInvoice(inv);
@@ -541,9 +527,10 @@ function DeclarationTool() {
       }
     };
 
-    // Always read as DataURL so we get base64 for PDFs and images
     if (isExcel) {
       reader.readAsBinaryString(file);
+    } else if (/\.pdf$/i.test(file.name) || file.type === "application/pdf") {
+      reader.readAsArrayBuffer(file);
     } else {
       reader.readAsDataURL(file);
     }
