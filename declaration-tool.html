@@ -653,70 +653,191 @@ function DeclarationTool() {
     const allied = ALLIED[declType.jurisdiction];
     const isImport = declType.type1 === "IM";
     const isIrish = declType.jurisdiction === "IE";
+    const isIrishImport = declType.id === "AIS_IMPORT";
+    const isIrishExport = declType.id === "AES_EXPORT";
+    const isUKImport = declType.id === "CDS_IMPORT";
+    const isUKExport = declType.id === "CDS_EXPORT";
     const office = header.officeIdentifier || (isIrish ? "IEDUB100" : "GB000080");
+    const NAI = "NAI";
 
-    const headers = [
-      "TemplateId1","TemplateId2","TraderReference","JobReference","DeclarationType1",
-      "TransportModeInland","TransportNationalityBorder","BX-M-N705",
-      "ConsignorName","ConsignorAddress","ConsignorCity","ConsignorPostcode","ConsignorCountryCode","ConsignorCodePrefix",
-      "ConsigneeCode","ConsigneeName","ConsigneeAddress","ConsigneeCity","ConsigneePostcode","ConsigneeCountryCode",
-      "PersonPayingCustomsDuty","InvoiceAmount","CurrencyCode","DeliveryCode",
-      "CountryOfDispatch","CountryOfDestination","OfficeImportExport","LocationIdentifier",
-      "TransportIdentityBorder","CustomsOfficeEntryExit","TransportModeBorder",
-      "CountryOfOrigin","PreferenceCode","IE-BX-I-U116",
-      "GrossMass","NetMass","ProcedureCode",
-      "ItemPackageQuantity","ItemPackageTypeCode","ItemMarksOfThePackage",
-      "CommodityCode","CommodityTaric","SupplementaryUnits","TaricQuantityUom",
-      "GoodsDescription",
-      "IE-BX-I-Y922","IE-BX-I-Y923","IE-BX-I-Y904","IE-BX-I-Y799","IE-BX-I-Y949",
-      "IE-BX-I-Y069","IE-BX-I-Y106","IE-BX-I-Y054","IE-BX-I-Y929","IE-BX-I-Y930",
-      "IE-BX-I-Y032","IE-BX-I-Y790","IE-BX-I-Y160","IE-BX-I-Y792",
-      "PreviousCustomsDocumentA","PreviousCustomsDocumentB","PreviousCustomsDocumentC",
-      "ItemPrice","BX-I-N935"
-    ];
+    let headers, rows;
 
-    const rows = items.map((item) => {
-      const commodityFull = String(item.commodityCode||"").replace(/\D/g,"").padEnd(10,"0");
-      const commodity8 = commodityFull.substring(0,8);
-      const commodityTaric = commodityFull.substring(8,10);
-      const NAI = "NAI";
-      return [
-        isIrish ? 4802 : 4801, null,
-        header.jobRef||"", header.jobRef||"",
-        declType.type1,
-        parseInt(header.transportMode)||1,
-        header.transportNationality||"",
-        "",
-        header.consignorName||"", "","","",
-        header.consignorCountry||"GB", "EOR",
-        header.consigneeEori||"", header.consigneeName||"", "","","",
-        header.consigneeCountry||"IE",
-        allied.eori,
-        parseFloat(header.invoiceAmount)||0,
-        header.currency||"GBP",
-        header.incoterm||"",
-        header.countryDispatch||"GB",
-        header.countryDestination||(isIrish?"IE":"GB"),
-        office, office, "", office,
-        parseInt(header.transportMode)||1,
-        item.originCountry||"",
-        item.preference||"100",
-        null,
-        parseFloat(item.grossMass)||0,
-        parseFloat(item.netMass||item.grossMass)||0,
-        header.procedureCode||"4000",
-        parseInt(item.packageQty)||1,
-        item.packageType||"pk",
-        "as addressed",
-        commodity8, commodityTaric,
-        parseInt(item.packageQty)||1, null,
-        item.description||"",
-        NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,
-        null,null,null,
-        parseFloat(item.itemPrice)||0,
-        header.jobRef||""
+    // ── IRISH IMPORT (AIS) — TemplateId1: 4802 ───────────────────────────────
+    if (isIrishImport) {
+      headers = [
+        "TemplateId1","TemplateId2","TraderReference","JobReference","DeclarationType1",
+        "TransportModeInland","TransportNationalityBorder","BX-M-N705",
+        "ConsignorName","ConsignorAddress","ConsignorCity","ConsignorPostcode","ConsignorCountryCode","ConsignorCodePrefix",
+        "ConsigneeCode","ConsigneeName","ConsigneeAddress","ConsigneeCity","ConsigneePostcode","ConsigneeCountryCode",
+        "PersonPayingCustomsDuty","InvoiceAmount","CurrencyCode","DeliveryCode",
+        "CountryOfDispatch","CountryOfDestination","OfficeImportExport","LocationIdentifier",
+        "TransportIdentityBorder","CustomsOfficeEntryExit","TransportModeBorder",
+        "CountryOfOrigin","PreferenceCode","IE-BX-I-U116",
+        "GrossMass","NetMass","ProcedureCode",
+        "ItemPackageQuantity","ItemPackageTypeCode","ItemMarksOfThePackage",
+        "CommodityCode","CommodityTaric","SupplementaryUnits","TaricQuantityUom",
+        "GoodsDescription",
+        "IE-BX-I-Y922","IE-BX-I-Y923","IE-BX-I-Y904","IE-BX-I-Y799","IE-BX-I-Y949",
+        "IE-BX-I-Y069","IE-BX-I-Y106","IE-BX-I-Y054","IE-BX-I-Y929","IE-BX-I-Y930",
+        "IE-BX-I-Y032","IE-BX-I-Y790","IE-BX-I-Y160","IE-BX-I-Y792",
+        "PreviousCustomsDocumentA","PreviousCustomsDocumentB","PreviousCustomsDocumentC",
+        "ItemPrice","BX-I-N935"
       ];
-    });
+      rows = items.map((item) => {
+        const cf = String(item.commodityCode||"").replace(/\D/g,"").padEnd(10,"0");
+        return [
+          4802, null,
+          header.jobRef||"", header.jobRef||"",
+          declType.type1,
+          parseInt(header.transportMode)||1,
+          header.transportNationality||"", "",
+          header.consignorName||"", "","","",
+          header.consignorCountry||"GB", "EOR",
+          header.consigneeEori||"", header.consigneeName||"", "","","",
+          header.consigneeCountry||"IE",
+          allied.eori,
+          parseFloat(header.invoiceAmount)||0,
+          header.currency||"GBP", header.incoterm||"",
+          header.countryDispatch||"GB",
+          header.countryDestination||"IE",
+          office, office, "", office,
+          parseInt(header.transportMode)||1,
+          item.originCountry||"", item.preference||"100", null,
+          parseFloat(item.grossMass)||0,
+          parseFloat(item.netMass||item.grossMass)||0,
+          header.procedureCode||"4000",
+          parseInt(item.packageQty)||1, item.packageType||"pk", "as addressed",
+          cf.substring(0,8), cf.substring(8,10),
+          parseInt(item.packageQty)||1, null,
+          item.description||"",
+          NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,NAI,
+          null,null,null,
+          parseFloat(item.itemPrice)||0,
+          header.jobRef||""
+        ];
+      });
+    }
+
+    // ── UK IMPORT (CDS) — TemplateId1: 5270 ──────────────────────────────────
+    else if (isUKImport) {
+      headers = [
+        "TemplateId1","TemplateId2","JobReference",
+        "ConsignorName","ConsignorAddress","ConsignorCity","ConsignorPostcode","ConsignorCountryCode",
+        "ConsigneeCode","ConsigneeName","ConsigneeAddress","ConsigneeCity","ConsigneePostcode","ConsigneeCountryCode",
+        "InvoiceAmount","CurrencyCode",
+        "MasterPreviousCategoryCode","MasterPreviousRef","MasterPreviousTypeCode",
+        "DeliveryCode","DeliveryUnLocode","MeansOfTransport","TransportIdentityBorder",
+        "TransportModeBorder","TRANSACTION_NATURE","TransportNationalityBorder",
+        "GoodsLocationOfficeCode","CountryOfDestination","AuthorisationHolders","BX-M-RRS01",
+        "ItemCountryOfDestination","ItemCountryOfDispatch",
+        "CommodityCode","CommodityTaric","COMMODITY_TARIC_ADD_1","CommodityNational",
+        "CountryOfOrigin","PreferenceCode","BX-I-U110",
+        "GoodsDescription","SupplementaryUnits",
+        "CUSTOMS_PROCEDURE_CODE","CUSTOMS_PROCEDURE_CATEGORY","M-FiscalReferences",
+        "GrossMass","NetMass","ItemPackageTypeCode","ItemPackageQuantity","ItemMarksOfThePackage",
+        "ItemPrice","VALUATION_METHOD","BX-I-N935","BX-I-NIDOM",
+        "BX-I-Y929","BX-I-Y900","BX-I-Y930","BX-I-Y931","BX-I-Y854","BX-I-Y063","BX-I-Y106"
+      ];
+      rows = items.map((item) => {
+        const cf = String(item.commodityCode||"").replace(/\D/g,"").padEnd(10,"0");
+        return [
+          5270, null,
+          header.jobRef||"",
+          header.consignorName||"", "","","", header.consignorCountry||"GB",
+          header.consigneeEori||"", header.consigneeName||"", "","","", header.consigneeCountry||"XI",
+          parseFloat(header.invoiceAmount)||0, header.currency||"GBP",
+          "Z", "", "380",
+          header.incoterm||"", "", "30", "",
+          6, 11, header.transportNationality||"GB",
+          "BELBELGVM", "XI",
+          `UKIM |${allied.eori}`, "",
+          null, header.countryDispatch||"GB",
+          cf.substring(0,8), cf.substring(8,10), null, "VATZ",
+          item.originCountry||"", item.preference||"100", null,
+          item.description||"", parseInt(item.packageQty)||1,
+          header.procedureCode||"4000", header.additionalProcedure||"000",
+          `FR1|${allied.eori.replace("XI","")}`,
+          parseFloat(item.grossMass)||0,
+          parseFloat(item.netMass||item.grossMass)||0,
+          item.packageType||"PK", parseInt(item.packageQty)||1, "As Addressed",
+          parseFloat(item.itemPrice)||0, "0",
+          header.jobRef||"", "|",
+          `NAI||Excluded from regulation834/2007`,
+          `NAI||CITES Permits not required`,
+          `NAI||2007/275/EC and2019/2007 Exempt`,
+          `NAI||Veterinary Derogation Applies`,
+          `NAI||regulation 2020/1158 Not Applicable`,
+          `NAI|| Not from China`,
+          `NAI|| REACH Compliant`
+        ];
+      });
+    }
+
+    // ── UK EXPORT (CDS) — TemplateId1: 7187 ──────────────────────────────────
+    else if (isUKExport) {
+      headers = [
+        "TemplateId1","TemplateId2","JobReference",
+        "GB-RepresentativeUseDeclarant","DeclarationType2",
+        "GB-ConsignorCode","ConsignorName","ConsignorAddress","ConsignorCity","ConsignorPostcode","ConsignorCountryCode",
+        "IE-ConsigneeCode","ConsigneeName","ConsigneeAddress","ConsigneeCity","ConsigneePostcode","ConsigneeCountryCode",
+        "IE-PersonPayingCustomsDuty","InvoiceAmount","CurrencyCode",
+        "GB-AuthorisationHolders","GB-M-MultiplePreviousCustomsDocs",
+        "MeansOfTransport","TransportIdentityBorder","GB-TransportModeBorder","IE-TransportModeBorder",
+        "TransportNationalityBorder","IE-BX-M-1D94","CustomsOfficeEntryExit",
+        "GB-LocationGoodsCountry","GB-LocationGoodsTypeLoc","GB-ChiefGoodsLocation",
+        "TransactionNature","GB-LocationGoodsLocId","IE-LocationGoodsLocId","GB-BX-M-RRS01",
+        "CommodityCode","ItemPackageTypeCode","ItemMarksOfThePackage","ItemPackageQuantity",
+        "SupplementaryUnits","GoodsDescription","CountryOfOrigin",
+        "GrossMass","NetMass","CustomsProcedureCode","CustomsProcedureCategory",
+        "ItemPrice","BX-M-N935",
+        "BX-I-Y900","BX-I-Y923","BX-I-Y903","BX-I-Y922","BX-I-Y924","BX-I-Y969",
+        "BX-I-9Y10","BX-I-9Y07","BX-I-9Y09","BX-I-9Y14"
+      ];
+      rows = items.map((item) => {
+        const cf = String(item.commodityCode||"").replace(/\D/g,"").padEnd(10,"0");
+        return [
+          7187, null,
+          header.jobRef||"",
+          "Y", declType.type2||"A",
+          header.consignorEori||allied.eori,
+          header.consignorName||"", "","","", header.consignorCountry||"GB",
+          header.consigneeEori||"", header.consigneeName||"", "","","", header.consigneeCountry||"IE",
+          header.consigneeEori||"",
+          parseFloat(header.invoiceAmount)||0, header.currency||"GBP",
+          `EXRR|${allied.eori}`, `Z|${header.jobRef||""}|380`,
+          "10", "", "6", "3",
+          header.transportNationality||"IE", "", "GB000126",
+          "GB","A","U", 11,
+          "PEDMILPEDGVM", office||"IEROS100",
+          allied.eori,
+          cf.substring(0,8),
+          item.packageType||"PK", "as addressed", parseInt(item.packageQty)||1,
+          parseInt(item.packageQty)||1,
+          item.description||"", item.originCountry||"",
+          parseFloat(item.grossMass)||0,
+          parseFloat(item.netMass||item.grossMass)||0,
+          header.procedureCode||"1040", header.additionalProcedure||"000",
+          parseFloat(item.itemPrice)||0,
+          header.jobRef||"",
+          `NAI|| CITES Permits not required`,
+          `NAI|| Excluded product`,
+          `NAI|| Export Cultural licence exempt`,
+          `NAI|| No cat or dog fur`,
+          `NAI|| Excluded from prohibition`,
+          `NAI|| regulation 2017/852 waiver`,
+          `License Exempt||License Exempt`,
+          `License Exempt||License Exempt`,
+          `License Exempt||License Exempt`,
+          `License Exempt||License Exempt`
+        ];
+      });
+    }
+
+    // ── IRISH EXPORT (AES) — no template yet, placeholder ────────────────────
+    else {
+      alert("Irish Export template not yet configured. Please raise with Descartes at your meeting.");
+      return;
+    }
 
     // ── Split into chunks of 99 lines max ──────────────────────────────
     const CHUNK = 99;
